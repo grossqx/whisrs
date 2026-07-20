@@ -14,6 +14,7 @@ use whisrs::audio::capture::{AudioCaptureHandle, SAMPLE_RATE};
 use whisrs::audio::feedback;
 use whisrs::history::{self, HistoryEntry};
 use whisrs::llm;
+use whisrs::service::ServiceManager;
 use whisrs::state::{Action, StateMachine};
 use whisrs::transcription::asr_sidecar::AsrSidecarBackend;
 use whisrs::transcription::deepgram::{DeepgramRestBackend, DeepgramStreamingBackend};
@@ -251,10 +252,26 @@ const COMPOSITOR_ENV_VARS: &[&str] = &[
 /// Polls `systemctl --user show-environment` with exponential backoff until
 /// a display server variable is found, then imports all compositor-related
 /// vars into the process environment.
+///
+/// This recovery path only exists under systemd, which is the only init system
+/// here that keeps a queryable user-environment store. Under OpenRC the init
+/// script recovers the session environment before exec instead — see
+/// `contrib/openrc/whisrs.initd`.
 async fn import_compositor_env() {
     // Already have a display server — nothing to do.
     if std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("DISPLAY").is_ok() {
         debug!("compositor environment already available");
+        return;
+    }
+
+    // Without systemd there is nothing to poll: retrying would just burn ~55s
+    // of backoff running a command that does not exist on this machine.
+    if ServiceManager::detect() != ServiceManager::Systemd {
+        warn!(
+            "no display server in environment and no systemd user environment to import from \
+             — clipboard and window tracking will not work. If you start whisrsd from a \
+             service manager, it must pass the compositor environment through."
+        );
         return;
     }
 

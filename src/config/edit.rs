@@ -2,19 +2,19 @@
 //!
 //! `whisrs config` opens a menu that lets the user jump to any section of the
 //! config file, edit it, and on save writes a validated `config.toml` and
-//! restarts the daemon if the systemd user unit is loaded.
+//! restarts the daemon if a user service is installed.
 //!
 //! This complements `whisrs setup` (the one-time onboarding wizard). `setup`
-//! handles install-time concerns — mic test, udev rules, systemd install,
+//! handles install-time concerns — mic test, udev rules, service install,
 //! compositor keybinding — while `config` only edits the TOML.
 
 use std::fs;
-use std::process::Command as StdCommand;
 
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Editor, Input, Select};
 
 use crate::config::setup;
+use crate::service::ServiceManager;
 use crate::{Config, RestartOutcome};
 
 use setup::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
@@ -177,18 +177,12 @@ fn current_key_summary(config: &Config) -> String {
 }
 
 fn daemon_status_string() -> String {
-    // `is-active` exits 0 when running. We don't surface "failed/inactive"
-    // separately — the user only cares about active vs not when deciding
-    // whether a restart is meaningful.
-    let active = StdCommand::new("systemctl")
-        .args(["--user", "is-active", "whisrs.service"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
-        .unwrap_or(false);
-    if active {
+    // We don't surface "failed/inactive" separately — the user only cares
+    // about active vs not when deciding whether a restart is meaningful.
+    if ServiceManager::detect().is_active() {
         format!("{GREEN}running{RESET}")
     } else {
-        format!("{DIM}not running (or no systemd unit){RESET}")
+        format!("{DIM}not running (or no service installed){RESET}")
     }
 }
 
@@ -611,17 +605,30 @@ fn save_and_restart(config: &Config, fresh: bool) -> Result<bool> {
     }
 
     println!("\n  Restarting daemon to pick up new config...");
-    match crate::restart_daemon_via_systemd() {
+    let manager = ServiceManager::detect();
+    match manager.restart() {
         RestartOutcome::Restarted => {
             println!("  {GREEN}Daemon restarted.{RESET}");
         }
         RestartOutcome::Failed => {
-            println!("  {RED}systemctl --user restart whisrs.service failed.{RESET}");
-            println!("  {DIM}Check `journalctl --user -u whisrs -e` for details.{RESET}");
+            let hint = manager.restart_hint().unwrap_or("restart");
+            println!("  {RED}{hint} failed.{RESET}");
+            match manager {
+                ServiceManager::Systemd => {
+                    println!("  {DIM}Check `journalctl --user -u whisrs -e` for details.{RESET}");
+                }
+                ServiceManager::OpenRc => {
+                    println!(
+                        "  {DIM}Check the daemon log under \
+                         $XDG_STATE_HOME/whisrs/whisrsd.log for details.{RESET}"
+                    );
+                }
+                ServiceManager::None => {}
+            }
         }
-        RestartOutcome::NoSystemdUnit => {
+        RestartOutcome::NoService => {
             println!(
-                "  {DIM}No whisrs.service user unit detected — restart the daemon manually \
+                "  {DIM}No whisrs service installed — restart the daemon manually \
                  for the new config to take effect:{RESET}"
             );
             println!("    pkill whisrsd; sleep 0.2; whisrsd &");
@@ -631,7 +638,7 @@ fn save_and_restart(config: &Config, fresh: bool) -> Result<bool> {
     if fresh {
         println!(
             "\n  {DIM}This was a fresh config. Run {BOLD}whisrs setup{RESET}{DIM} once to install\n   \
-             udev rules, the systemd unit, and a compositor keybinding.{RESET}"
+             udev rules, the service unit, and a compositor keybinding.{RESET}"
         );
     }
     Ok(true)

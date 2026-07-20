@@ -59,8 +59,11 @@ or
 .B restart
 Restart the whisrs daemon. Uses
 .B systemctl --user restart whisrs.service
-when the systemd user unit is loaded; otherwise prints guidance for
-manual restart. Does not require the daemon to be running \(em
+on systemd systems and
+.B rc-service --user whisrs restart
+on OpenRC systems, when the corresponding user service is installed;
+otherwise prints guidance for manual restart. Does not require the daemon
+to be running \(em
 .B restart
 will start a stopped service.
 .SH ENVIRONMENT

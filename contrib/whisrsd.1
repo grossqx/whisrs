@@ -159,6 +159,12 @@ Enable as a systemd user service:
 .RS
 systemctl \-\-user enable \-\-now whisrs.service
 .RE
+.PP
+Enable as an OpenRC user service:
+.PP
+.RS
+rc\-update \-\-user add whisrs default && rc\-service \-\-user whisrs start
+.RE
 .SH SEE ALSO
 .BR whisrs (1)
 .SH AUTHORS
