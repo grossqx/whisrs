@@ -1109,7 +1109,7 @@ fn openrc_initd_contents(whisrsd_path: &str) -> String {
          \t# OpenRC scrubs the environment, so recover the session vars the\n\
          \t# daemon needs. The compositor's environ holds what it inherited;\n\
          \t# what it created after exec is derived from the runtime dir.\n\
-         \tfor _p in $(pgrep -u \"$(id -u)\" -x 'Hyprland|sway|niri|gnome-shell|kwin_wayland' 2>/dev/null); do\n\
+         \tfor _p in $(pgrep -u \"$(id -u)\" -x 'Hyprland|sway|niri|gnome-shell|kwin_wayland|labwc|river' 2>/dev/null); do\n\
          \t\tfor _v in DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XAUTHORITY; do\n\
          \t\t\teval \"[ -n \\\"\\${{$_v}}\\\" ]\" && continue\n\
          \t\t\t_val=$(tr '\\0' '\\n' < \"/proc/$_p/environ\" 2>/dev/null | sed -n \"s/^$_v=//p\" | head -1)\n\
@@ -1126,6 +1126,15 @@ fn openrc_initd_contents(whisrsd_path: &str) -> String {
          \t[ -n \"$DISPLAY\" ] || for _p in $(pgrep -u \"$(id -u)\" -x Xwayland 2>/dev/null); do\n\
          \t\texport DISPLAY=\"$(tr '\\0' '\\n' < \"/proc/$_p/cmdline\" | sed -n '/^:[0-9][0-9]*$/p' | head -1)\"; break\n\
          \tdone\n\
+         \t[ -n \"$SWAYSOCK\" ] || for _s in \"$XDG_RUNTIME_DIR\"/sway-ipc.*.sock; do\n\
+         \t\t[ -S \"$_s\" ] && export SWAYSOCK=\"$_s\" && break\n\
+         \tdone\n\
+         \t[ -n \"$NIRI_SOCKET\" ] || for _s in \"$XDG_RUNTIME_DIR\"/niri.*.sock; do\n\
+         \t\t[ -S \"$_s\" ] && export NIRI_SOCKET=\"$_s\" && break\n\
+         \tdone\n\
+         \tif [ -z \"$DBUS_SESSION_BUS_ADDRESS\" ] && [ -S \"$XDG_RUNTIME_DIR/bus\" ]; then\n\
+         \t\texport DBUS_SESSION_BUS_ADDRESS=\"unix:path=$XDG_RUNTIME_DIR/bus\"\n\
+         \tfi\n\
          }}\n"
     )
 }
