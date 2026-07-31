@@ -47,13 +47,20 @@ Open an issue using the bug report template. Include:
 
 ```bash
 # Arch Linux
-sudo pacman -S base-devel alsa-lib libxkbcommon pkg-config
+sudo pacman -S base-devel alsa-lib libxkbcommon pkg-config clang cmake
 
 # Ubuntu/Debian
-sudo apt install build-essential libasound2-dev libxkbcommon-dev pkg-config
+sudo apt install build-essential libasound2-dev libxkbcommon-dev pkg-config libclang-dev cmake
 
 # Fedora
-sudo dnf install alsa-lib-devel libxkbcommon-devel pkg-config
+sudo dnf install gcc-c++ alsa-lib-devel libxkbcommon-devel pkg-config clang-devel cmake
+```
+
+`clang` and `cmake` are needed because `local-whisper` (whisper.cpp via whisper-rs) is a
+default feature. To skip that toolchain, build without it:
+
+```bash
+cargo build --no-default-features --features tray,overlay
 ```
 
 ### Build and test
@@ -85,12 +92,32 @@ src/
   daemon/main.rs       — daemon (the real application)
   lib.rs               — shared types, config, IPC protocol
   state.rs             — state machine
-  audio/               — cpal capture, WAV encoding, silence detection
+  audio/               — cpal capture, WAV encoding, playback
   transcription/       — backend trait + Groq, OpenAI, local implementations
-  input/               — uinput keyboard, XKB keymap, clipboard
+  tts/                 — text-to-speech backends (read selection aloud)
   window/              — compositor-specific window tracking
-  config/              — interactive setup
+  hotkey/              — evdev hotkey listener + spec parsing
+  tray/, overlay/      — tray icon and recording overlay (feature-gated)
+  config/              — interactive setup and config editor
 ```
+
+Injection policy stays in the daemon (`inject_text` and friends in `src/daemon/main.rs`),
+but the primitives it calls live in the `xkb-type` workspace crate, alongside four other
+extracted crates:
+
+```
+crates/
+  xkb-type/            — uinput keyboard, XKB keymap, clipboard, wayland virtual keyboard
+  asr-dedup/           — timestamp + n-gram dedup for chunked ASR
+  audio-silence-gate/  — RMS energy gate / VAD
+  filler-remove/       — filler-word stripping
+  prompt-echo/         — prompt-echo hallucination filter
+```
+
+These are published to crates.io independently. A change to one needs a version bump in
+its own `Cargo.toml`. The root `Cargo.toml` dependency line only needs editing when the
+new version falls outside its existing requirement: all five are caret requirements, so
+any 0.1.x bump is absorbed and only a 0.2.0 would force a root edit.
 
 ## Code Style
 
