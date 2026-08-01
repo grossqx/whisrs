@@ -11,3 +11,4 @@ crates/*/Cargo.lock
 .worktrees/
 .deepseek/
 .claude/
+graphify-out/
