@@ -15,6 +15,8 @@ mod command_mode;
 mod context;
 mod dictation;
 mod factory;
+#[cfg(feature = "hooks")]
+mod hooks;
 mod injection;
 mod notify;
 mod pipeline;
@@ -138,6 +140,14 @@ async fn main() -> Result<()> {
             cmd_tx.clone(),
             tray_notify,
         ));
+    }
+
+    // Recording-lifecycle hooks (MPRIS pause + shell commands). Watches the
+    // same state broadcast as the tray/overlay; detached, so failures never
+    // delay recording.
+    #[cfg(feature = "hooks")]
+    if let Some(hooks) = context.config.hooks.clone() {
+        tokio::spawn(crate::hooks::hook_dispatch_loop(state_rx.clone(), hooks));
     }
 
     // Start bottom recording overlay if enabled.

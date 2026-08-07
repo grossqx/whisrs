@@ -80,6 +80,7 @@ fn default_config() -> Config {
         llm: None,
         tts: None,
         hotkeys: None,
+        hooks: None,
         llm_commands: Vec::new(),
         overlay: None,
     }

@@ -171,6 +171,7 @@ pub fn run_setup() -> Result<()> {
         llm: llm_config,
         tts: None,
         hotkeys: None,
+        hooks: None,
         overlay: if overlay { overlay_config } else { None },
         llm_commands: Vec::new(),
     };
@@ -804,7 +805,7 @@ fn write_config_to(config: &Config, config_path: &Path) -> Result<()> {
     // their values are; the on-disk document is the source of truth for
     // comments, ordering, and formatting.
     let fresh_str = toml::to_string_pretty(config).context("failed to serialize config to TOML")?;
-    let output = match fs::read_to_string(config_path) {
+    let mut output = match fs::read_to_string(config_path) {
         Ok(existing_str) => match existing_str.parse::<DocumentMut>() {
             Ok(mut existing) => {
                 let fresh: DocumentMut = fresh_str
@@ -859,6 +860,18 @@ fn write_config_to(config: &Config, config_path: &Path) -> Result<()> {
             });
         }
     };
+
+    // Appended as a trailing comment: `merge_table` only touches keys, so
+    // unrecognized trailing text survives the round-trip.  Only shown when the
+    // user hasn't configured hooks yet.
+    if config.hooks.is_none() {
+        output.push_str(
+            "\n# [hooks]\n\
+             # media_auto_pause = true   # pause MPRIS playback while dictating\n\
+             # on_record_start = \"\"     # shell command on recording start\n\
+             # on_record_stop = \"\"      # shell command on recording stop\n",
+        );
+    }
 
     atomic_write(config_path, &output)
         .with_context(|| format!("failed to write config to {}", config_path.display()))
