@@ -92,7 +92,7 @@ pub struct HooksConfig {
 
 /// Visual configuration for the bottom recording overlay.
 ///
-/// The shape is intentionally clamped tight (90–120 × 28–40) to keep the
+/// The shape is intentionally clamped tight (90–120 × 36–48) to keep the
 /// gaussian-tapered bar layout legible. Themes pick the colors; if `colors`
 /// is set, those override the theme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ pub struct OverlayConfig {
     /// Pill width in pixels (clamped to 90..=120).
     #[serde(default = "default_overlay_width")]
     pub width: u32,
-    /// Pill height in pixels (clamped to 28..=40).
+    /// Pill height in pixels (clamped to 36..=48).
     #[serde(default = "default_overlay_height")]
     pub height: u32,
     /// Custom color overrides; honored when `theme = "custom"`.
@@ -1987,6 +1987,7 @@ mod tests {
             }),
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,

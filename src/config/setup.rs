@@ -863,14 +863,14 @@ fn write_config_to(config: &Config, config_path: &Path) -> Result<()> {
 
     // Appended as a trailing comment: `merge_table` only touches keys, so
     // unrecognized trailing text survives the round-trip.  Only shown when the
-    // user hasn't configured hooks yet.
-    if config.hooks.is_none() {
-        output.push_str(
-            "\n# [hooks]\n\
+    // user hasn't configured hooks yet, and only if the hint isn't already
+    // present (idempotent: writing twice must produce the same bytes).
+    const HOOKS_HINT: &str = "\n# [hooks]\n\
              # media_auto_pause = true   # pause MPRIS playback while dictating\n\
              # on_record_start = \"\"     # shell command on recording start\n\
-             # on_record_stop = \"\"      # shell command on recording stop\n",
-        );
+             # on_record_stop = \"\"      # shell command on recording stop\n";
+    if config.hooks.is_none() && !output.contains(HOOKS_HINT) {
+        output.push_str(HOOKS_HINT);
     }
 
     atomic_write(config_path, &output)

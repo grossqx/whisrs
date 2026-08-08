@@ -18,6 +18,9 @@ pub(crate) async fn hook_dispatch_loop(
         match hook_event_for(prev, new) {
             Some(HookEvent::RecordStart) => {
                 if hooks.media_auto_pause {
+                    if !paused_players.is_empty() {
+                        whisrs::mpris::resume(&paused_players).await;
+                    }
                     paused_players = whisrs::mpris::pause_playing().await;
                 }
                 if let Some(cmd) = hooks.on_record_start.as_deref() {
@@ -25,8 +28,8 @@ pub(crate) async fn hook_dispatch_loop(
                 }
             }
             Some(HookEvent::RecordStop) => {
-                if hooks.media_auto_pause && !paused_players.is_empty() {
-                    whisrs::mpris::resume(&paused_players).await;
+                if hooks.media_auto_pause {
+                    whisrs::mpris::resume_all().await;
                     paused_players.clear();
                 }
                 if let Some(cmd) = hooks.on_record_stop.as_deref() {

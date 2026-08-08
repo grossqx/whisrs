@@ -31,6 +31,8 @@ use crate::factory::create_backend;
 use crate::injection::warm_keyboard;
 use crate::notify::send_notification;
 use crate::speak::handle_speak;
+#[cfg(feature = "hooks")]
+use crate::startup::check_session_bus;
 use crate::startup::{
     check_audio_devices, check_uinput_access, cleanup_stale_socket, import_compositor_env,
     load_config, validate_config,
@@ -80,6 +82,12 @@ async fn main() -> Result<()> {
         std::time::Duration::from_millis(config.input.key_delay_ms),
         config.input.backend,
     );
+
+    // Check D-Bus session bus if MPRIS media pause is configured.
+    #[cfg(feature = "hooks")]
+    if config.hooks.as_ref().is_some_and(|h| h.media_auto_pause) {
+        check_session_bus().await;
+    }
 
     let window_tracker: Arc<dyn WindowTracker> = Arc::from(window::detect_tracker());
     info!(
