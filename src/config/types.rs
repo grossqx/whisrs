@@ -344,6 +344,20 @@ pub struct InputConfig {
     /// can never be restored is worse than losing the fallback (issue #69).
     #[serde(default)]
     pub clipboard_fallback: bool,
+    /// Copy-only mode: the final text is written to the system clipboard
+    /// and never injected at the cursor — no keystrokes, no Ctrl+V.
+    ///
+    /// This is the terminal form of [`Self::clipboard_fallback`]: instead
+    /// of *also* copying after injecting, the clipboard *is* the output.
+    /// Dictation then works like a "dictate to clipboard" tool — record,
+    /// stop, paste wherever you like. Command mode follows the same rule:
+    /// the rewritten text lands in the clipboard and the selection is left
+    /// untouched.
+    ///
+    /// Takes precedence over both `paste` and `clipboard_fallback` (they
+    /// become no-ops), so `whisrsd` never injects while this is set.
+    #[serde(default)]
+    pub clipboard_only: bool,
     /// Extra window classes to treat as terminal emulators, checked alongside
     /// the built-in list. Empty by default.
     ///
@@ -374,6 +388,7 @@ impl Default for InputConfig {
             backend: InjectorBackend::default(),
             paste: false,
             clipboard_fallback: false,
+            clipboard_only: false,
             terminal_classes: Vec::new(),
         }
     }
@@ -1113,15 +1128,20 @@ mod tests {
         // without it) keeps the current behavior.
         let absent: InputConfig = toml::from_str("").unwrap();
         assert!(!absent.clipboard_fallback);
+        assert!(!absent.clipboard_only);
 
-        let cfg: InputConfig = toml::from_str("clipboard_fallback = true").unwrap();
+        let cfg: InputConfig =
+            toml::from_str("clipboard_fallback = true\nclipboard_only = true").unwrap();
         assert!(cfg.clipboard_fallback);
+        assert!(cfg.clipboard_only);
 
         // Round-trips back out and parses again identically.
         let serialized = toml::to_string(&cfg).unwrap();
         assert!(serialized.contains("clipboard_fallback = true"));
+        assert!(serialized.contains("clipboard_only = true"));
         let reparsed: InputConfig = toml::from_str(&serialized).unwrap();
         assert!(reparsed.clipboard_fallback);
+        assert!(reparsed.clipboard_only);
     }
 
     #[test]

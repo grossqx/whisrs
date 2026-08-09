@@ -53,6 +53,7 @@ pub fn run_config_menu() -> Result<()> {
             "Audio device",
             "Keyboard injection (key delay)",
             "Clipboard fallback (copy transcript to clipboard)",
+            "Clipboard-only mode (no injection)",
             "Hotkeys",
             "Tray & overlay",
             "Command mode (LLM)",
@@ -80,30 +81,31 @@ pub fn run_config_menu() -> Result<()> {
             5 => edit_audio_device(&mut config)?,
             6 => edit_key_delay(&mut config)?,
             7 => edit_clipboard_fallback(&mut config)?,
-            8 => edit_hotkeys(&mut config)?,
-            9 => edit_tray_overlay(&mut config)?,
-            10 => edit_llm(&mut config)?,
-            11 => edit_llm_commands(&mut config)?,
-            12 => show_config(&config),
-            13 => {
+            8 => edit_clipboard_only(&mut config)?,
+            9 => edit_hotkeys(&mut config)?,
+            10 => edit_tray_overlay(&mut config)?,
+            11 => edit_llm(&mut config)?,
+            12 => edit_llm_commands(&mut config)?,
+            13 => show_config(&config),
+            14 => {
                 if open_in_editor(&mut config)? {
                     // External edit already wrote the file; reload and skip the
                     // normal save path so we don't clobber formatting/comments
-                    // the user might have added.
+                    // (see open_in_editor).
                     println!("  {GREEN}Applied edits from $EDITOR.{RESET}");
                 }
             }
-            14 => {
+            15 => {
                 // separator — no-op
             }
-            15 => {
+            16 => {
                 if save_and_restart(&config, fresh)? {
                     return Ok(());
                 }
                 // Validation failed — fall through to next loop iteration,
                 // preserving the in-memory `config` so the user can fix it.
             }
-            16 => {
+            17 => {
                 println!("\n  {DIM}Discarded changes.{RESET}");
                 return Ok(());
             }
@@ -418,6 +420,22 @@ fn edit_clipboard_fallback(config: &mut Config) -> Result<()> {
         .default(config.input.clipboard_fallback)
         .interact()
         .unwrap_or(config.input.clipboard_fallback);
+    Ok(())
+}
+
+fn edit_clipboard_only(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard-only mode{RESET}");
+    println!(
+        "  {DIM}Copy the transcript to the clipboard without injecting it at \
+         the cursor — no keystrokes, no paste. Overrides paste and \
+         clipboard fallback.{RESET}"
+    );
+
+    config.input.clipboard_only = Confirm::new()
+        .with_prompt("Copy only to the clipboard (no injection)?")
+        .default(config.input.clipboard_only)
+        .interact()
+        .unwrap_or(config.input.clipboard_only);
     Ok(())
 }
 

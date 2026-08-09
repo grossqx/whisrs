@@ -476,6 +476,7 @@ async fn command_mode_background_inner(
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
     let clipboard_fallback = context.config.input.clipboard_fallback;
+    let clipboard_only = context.config.input.clipboard_only;
     match tokio::task::spawn_blocking(move || {
         if is_terminal {
             if let Err(e) = clear_line_via_keyboard(key_delay, injector_backend) {
@@ -489,6 +490,7 @@ async fn command_mode_background_inner(
             injector_backend,
             paste,
             clipboard_fallback,
+            clipboard_only,
         )
     })
     .await
@@ -940,6 +942,7 @@ async fn llm_command_background_inner(
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
     let clipboard_fallback = context.config.input.clipboard_fallback;
+    let clipboard_only = context.config.input.clipboard_only;
     match tokio::task::spawn_blocking(move || {
         inject_text(
             &result_clone,
@@ -948,6 +951,7 @@ async fn llm_command_background_inner(
             injector_backend,
             paste,
             clipboard_fallback,
+            clipboard_only,
         )
     })
     .await

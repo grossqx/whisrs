@@ -67,6 +67,9 @@ pub(crate) struct StreamingPipelineParams {
     /// `[input] clipboard_fallback`: leave the final transcript in the
     /// clipboard as a manual-fix fallback for silent injection failures.
     pub(crate) clipboard_fallback: bool,
+    /// `[input] clipboard_only`: copy-only dictation — the transcript is
+    /// written to the clipboard and never typed at the cursor.
+    pub(crate) clipboard_only: bool,
 }
 
 /// The streaming pipeline: reads audio in real-time, sends to API, types text.
@@ -93,6 +96,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         key_delay,
         injector_backend,
         clipboard_fallback,
+        clipboard_only,
     } = params;
     // State-progress toasts are noise when the overlay is on.
     let notify_state = notify && !overlay_enabled;
@@ -136,41 +140,44 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                 let tracker = Arc::clone(&window_tracker);
                 let focused = Arc::clone(&focused);
                 async move {
-                    // Focus the original window (only once, or re-focus if needed).
-                    if !focused.swap(true, Ordering::SeqCst) {
-                        if let Some(wid) = &wid {
-                            if let Err(e) = tracker.focus_window(wid) {
-                                warn!("failed to refocus window {wid} before typing: {e}");
-                            } else {
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    if !clipboard_only {
+                        // Focus the original window (only once, or re-focus if needed).
+                        if !focused.swap(true, Ordering::SeqCst) {
+                            if let Some(wid) = &wid {
+                                if let Err(e) = tracker.focus_window(wid) {
+                                    warn!("failed to refocus window {wid} before typing: {e}");
+                                } else {
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
                             }
                         }
-                    }
 
-                    info!("typing: {:?}", text_to_type);
-                    // Streaming deliberately bypasses `inject_text` / `[input]
-                    // paste`: partial deltas are typed as they arrive, and a
-                    // paste per delta would thrash the clipboard.
-                    match tokio::task::spawn_blocking(move || {
-                        type_text_at_cursor(&text_to_type, key_delay, injector_backend)
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => warn!("failed to type text: {e:#}"),
-                        Err(e) => warn!("failed to join typing task: {e}"),
+                        info!("typing: {:?}", text_to_type);
+                        // Streaming deliberately bypasses `inject_text` / `[input]
+                        // paste`: partial deltas are typed as they arrive, and a
+                        // paste per delta would thrash the clipboard.
+                        match tokio::task::spawn_blocking(move || {
+                            type_text_at_cursor(&text_to_type, key_delay, injector_backend)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => warn!("failed to type text: {e:#}"),
+                            Err(e) => warn!("failed to join typing task: {e}"),
+                        }
                     }
                 }
             })
             .await;
 
-        // `[input] clipboard_fallback`: leave the full accumulated transcript
-        // in the clipboard once the recording stops or is cancelled, as a
-        // manual-fix fallback for silent injection failures (see
-        // `InputConfig::clipboard_fallback`). Skipped when nothing was
-        // typed — copying an empty string would clobber the user's clipboard
-        // for nothing.
-        if clipboard_fallback && !full_text.is_empty() {
+        // `[input] clipboard_fallback` / `[input] clipboard_only`: leave the
+        // full accumulated transcript in the clipboard once the recording
+        // stops or is cancelled — as a manual-fix fallback for silent
+        // injection failures, or as the only output in copy-only mode (see
+        // `InputConfig::clipboard_fallback` / `::clipboard_only`). Skipped
+        // when nothing was typed — copying an empty string would clobber
+        // the user's clipboard for nothing.
+        if (clipboard_fallback || clipboard_only) && !full_text.is_empty() {
             let text = full_text.clone();
             match tokio::task::spawn_blocking(move || xkb_type::default_clipboard().set_text(&text))
                 .await
@@ -912,6 +919,7 @@ pub(crate) async fn process_recording_batch(
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
     let clipboard_fallback = context.config.input.clipboard_fallback;
+    let clipboard_only = context.config.input.clipboard_only;
     let is_terminal = if paste {
         context
             .window_tracker
@@ -929,6 +937,7 @@ pub(crate) async fn process_recording_batch(
             injector_backend,
             paste,
             clipboard_fallback,
+            clipboard_only,
         )
     })
     .await

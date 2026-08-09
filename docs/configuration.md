@@ -112,6 +112,11 @@ paste = false
 # Streaming backends (deepgram-streaming, openai-realtime, local-whisper, ...)
 # type incrementally and copy the full final transcript when recording stops.
 clipboard_fallback = false
+# Copy-only mode: the final transcript is written to the clipboard and never
+# injected at the cursor — no keystrokes, no Ctrl+V. Overrides paste and
+# clipboard_fallback (both become no-ops). Handy for a "dictate to clipboard"
+# workflow. Default: false.
+clipboard_only = false
 # Extra window classes to treat as terminal emulators, checked alongside the
 # built-in list. Default: [] (built-in list only).
 #
