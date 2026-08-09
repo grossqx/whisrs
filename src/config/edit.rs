@@ -52,6 +52,7 @@ pub fn run_config_menu() -> Result<()> {
             "Vocabulary & prompt",
             "Audio device",
             "Keyboard injection (key delay)",
+            "Clipboard fallback (copy transcript to clipboard)",
             "Hotkeys",
             "Tray & overlay",
             "Command mode (LLM)",
@@ -78,12 +79,13 @@ pub fn run_config_menu() -> Result<()> {
             4 => edit_vocabulary_and_prompt(&mut config)?,
             5 => edit_audio_device(&mut config)?,
             6 => edit_key_delay(&mut config)?,
-            7 => edit_hotkeys(&mut config)?,
-            8 => edit_tray_overlay(&mut config)?,
-            9 => edit_llm(&mut config)?,
-            10 => edit_llm_commands(&mut config)?,
-            11 => show_config(&config),
-            12 => {
+            7 => edit_clipboard_fallback(&mut config)?,
+            8 => edit_hotkeys(&mut config)?,
+            9 => edit_tray_overlay(&mut config)?,
+            10 => edit_llm(&mut config)?,
+            11 => edit_llm_commands(&mut config)?,
+            12 => show_config(&config),
+            13 => {
                 if open_in_editor(&mut config)? {
                     // External edit already wrote the file; reload and skip the
                     // normal save path so we don't clobber formatting/comments
@@ -91,17 +93,17 @@ pub fn run_config_menu() -> Result<()> {
                     println!("  {GREEN}Applied edits from $EDITOR.{RESET}");
                 }
             }
-            13 => {
+            14 => {
                 // separator — no-op
             }
-            14 => {
+            15 => {
                 if save_and_restart(&config, fresh)? {
                     return Ok(());
                 }
                 // Validation failed — fall through to next loop iteration,
                 // preserving the in-memory `config` so the user can fix it.
             }
-            15 => {
+            16 => {
                 println!("\n  {DIM}Discarded changes.{RESET}");
                 return Ok(());
             }
@@ -400,6 +402,22 @@ fn edit_key_delay(config: &mut Config) -> Result<()> {
     } else {
         println!("  {YELLOW}Not a number — left unchanged.{RESET}");
     }
+    Ok(())
+}
+
+fn edit_clipboard_fallback(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard fallback{RESET}");
+    println!(
+        "  {DIM}Keep the final transcript in the system clipboard as a fallback, \\\
+         alongside injecting it at the cursor. Use this if injection fails \\\
+         silently or produces garbled text — paste and fix manually.{RESET}"
+    );
+
+    config.input.clipboard_fallback = Confirm::new()
+        .with_prompt("Keep the transcript in the clipboard after dictation?")
+        .default(config.input.clipboard_fallback)
+        .interact()
+        .unwrap_or(config.input.clipboard_fallback);
     Ok(())
 }
 

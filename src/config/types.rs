@@ -289,6 +289,37 @@ pub struct InputConfig {
     /// this is set alongside one of those backends.
     #[serde(default)]
     pub paste: bool,
+    /// Leave the injected text in the system clipboard as a manual-fix
+    /// fallback for silent injection failures. Off by default.
+    ///
+    /// Injection can fail silently: a compositor that drops keystrokes from
+    /// a freshly-created uinput device, a TUI that eats characters, a window
+    /// that loses focus mid-injection. When it does, nothing on screen tells
+    /// you the text was mangled or lost. With this on, the final text is
+    /// always left in the clipboard afterwards, so a single Ctrl+V pastes
+    /// exactly what was dictated and you can correct from there instead of
+    /// re-dictating.
+    ///
+    /// What "afterwards" means per path:
+    /// - Typing mode (`paste = false`): the text is copied after the
+    ///   keystroke injection runs, whether that injection succeeded or
+    ///   failed — the clipboard copy *is* the fallback for the failure case.
+    /// - Paste mode (`paste = true`): pasting already puts the text on the
+    ///   clipboard, so the usual restore of the previous clipboard contents
+    ///   is skipped entirely; the transcribed text simply stays there.
+    /// - Streaming dictation: the full accumulated transcript is copied once
+    ///   the recording stops or is cancelled.
+    ///
+    /// Trade-off: the clipboard is clobbered on every dictation — anything
+    /// copied beforehand is gone, and it is not restored. That is the point
+    /// of the feature (the fallback only works because the text is there),
+    /// but it also means the clipboard no longer survives a dictation. In
+    /// paste mode a non-text clipboard (an image, a file list) is still
+    /// protected: an unreadable clipboard makes the paste path fall back to
+    /// typing without touching the clipboard, since overwriting content that
+    /// can never be restored is worse than losing the fallback (issue #69).
+    #[serde(default)]
+    pub clipboard_fallback: bool,
     /// Extra window classes to treat as terminal emulators, checked alongside
     /// the built-in list. Empty by default.
     ///
@@ -318,6 +349,7 @@ impl Default for InputConfig {
             key_delay_ms: default_key_delay_ms(),
             backend: InjectorBackend::default(),
             paste: false,
+            clipboard_fallback: false,
             terminal_classes: Vec::new(),
         }
     }
@@ -978,6 +1010,23 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_input_clipboard_fallback_roundtrip() {
+        // Opt-in: an `[input]` table written before the key existed (or
+        // without it) keeps the current behavior.
+        let absent: InputConfig = toml::from_str("").unwrap();
+        assert!(!absent.clipboard_fallback);
+
+        let cfg: InputConfig = toml::from_str("clipboard_fallback = true").unwrap();
+        assert!(cfg.clipboard_fallback);
+
+        // Round-trips back out and parses again identically.
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(serialized.contains("clipboard_fallback = true"));
+        let reparsed: InputConfig = toml::from_str(&serialized).unwrap();
+        assert!(reparsed.clipboard_fallback);
+    }
 
     #[test]
     fn config_tts_section_roundtrip() {

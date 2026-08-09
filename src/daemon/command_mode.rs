@@ -378,6 +378,7 @@ async fn command_mode_background_inner(
     let key_delay = std::time::Duration::from_millis(context.config.input.key_delay_ms);
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
+    let clipboard_fallback = context.config.input.clipboard_fallback;
     let is_terminal = context
         .window_tracker
         .get_focused_window_class()
@@ -389,7 +390,14 @@ async fn command_mode_background_inner(
                 warn!("command mode: failed to clear terminal line, injecting anyway: {e:#}");
             }
         }
-        inject_text(&text_clone, is_terminal, key_delay, injector_backend, paste)
+        inject_text(
+            &text_clone,
+            is_terminal,
+            key_delay,
+            injector_backend,
+            paste,
+            clipboard_fallback,
+        )
     })
     .await
     {
@@ -794,6 +802,7 @@ async fn llm_command_background_inner(
     let key_delay = std::time::Duration::from_millis(context.config.input.key_delay_ms);
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
+    let clipboard_fallback = context.config.input.clipboard_fallback;
     let is_terminal = if paste {
         context
             .window_tracker
@@ -810,6 +819,7 @@ async fn llm_command_background_inner(
             key_delay,
             injector_backend,
             paste,
+            clipboard_fallback,
         )
     })
     .await

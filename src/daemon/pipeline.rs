@@ -56,6 +56,9 @@ pub(crate) struct StreamingPipelineParams {
     pub(crate) backend_name: String,
     pub(crate) key_delay: Duration,
     pub(crate) injector_backend: InjectorBackend,
+    /// `[input] clipboard_fallback`: leave the final transcript in the
+    /// clipboard as a manual-fix fallback for silent injection failures.
+    pub(crate) clipboard_fallback: bool,
 }
 
 /// The streaming pipeline: reads audio in real-time, sends to API, types text.
@@ -81,6 +84,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         backend_name,
         key_delay,
         injector_backend,
+        clipboard_fallback,
     } = params;
     // State-progress toasts are noise when the overlay is on.
     let notify_state = notify && !overlay_enabled;
@@ -118,38 +122,58 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         // Sequenced by the batcher awaiting each sink call, so a plain
         // atomic is enough to carry the flag into the 'static sink futures.
         let focused = Arc::new(AtomicBool::new(false));
-        run_typing_batcher(text_rx, typing_cancel, filler_filter, move |text_to_type| {
-            let wid = wid.clone();
-            let tracker = Arc::clone(&window_tracker);
-            let focused = Arc::clone(&focused);
-            async move {
-                // Focus the original window (only once, or re-focus if needed).
-                if !focused.swap(true, Ordering::SeqCst) {
-                    if let Some(wid) = &wid {
-                        if let Err(e) = tracker.focus_window(wid) {
-                            warn!("failed to refocus window {wid} before typing: {e}");
-                        } else {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let full_text =
+            run_typing_batcher(text_rx, typing_cancel, filler_filter, move |text_to_type| {
+                let wid = wid.clone();
+                let tracker = Arc::clone(&window_tracker);
+                let focused = Arc::clone(&focused);
+                async move {
+                    // Focus the original window (only once, or re-focus if needed).
+                    if !focused.swap(true, Ordering::SeqCst) {
+                        if let Some(wid) = &wid {
+                            if let Err(e) = tracker.focus_window(wid) {
+                                warn!("failed to refocus window {wid} before typing: {e}");
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
                         }
                     }
-                }
 
-                info!("typing: {:?}", text_to_type);
-                // Streaming deliberately bypasses `inject_text` / `[input]
-                // paste`: partial deltas are typed as they arrive, and a
-                // paste per delta would thrash the clipboard.
-                match tokio::task::spawn_blocking(move || {
-                    type_text_at_cursor(&text_to_type, key_delay, injector_backend)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => warn!("failed to type text: {e:#}"),
-                    Err(e) => warn!("failed to join typing task: {e}"),
+                    info!("typing: {:?}", text_to_type);
+                    // Streaming deliberately bypasses `inject_text` / `[input]
+                    // paste`: partial deltas are typed as they arrive, and a
+                    // paste per delta would thrash the clipboard.
+                    match tokio::task::spawn_blocking(move || {
+                        type_text_at_cursor(&text_to_type, key_delay, injector_backend)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!("failed to type text: {e:#}"),
+                        Err(e) => warn!("failed to join typing task: {e}"),
+                    }
                 }
+            })
+            .await;
+
+        // `[input] clipboard_fallback`: leave the full accumulated transcript
+        // in the clipboard once the recording stops or is cancelled, as a
+        // manual-fix fallback for silent injection failures (see
+        // `InputConfig::clipboard_fallback`). Skipped when nothing was
+        // typed — copying an empty string would clobber the user's clipboard
+        // for nothing.
+        if clipboard_fallback && !full_text.is_empty() {
+            let text = full_text.clone();
+            match tokio::task::spawn_blocking(move || xkb_type::default_clipboard().set_text(&text))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("failed to set clipboard fallback: {e:#}"),
+                Err(e) => warn!("failed to join clipboard fallback task: {e}"),
             }
-        })
-        .await
+        }
+
+        full_text
     });
 
     // Forward audio from capture to backend, with auto-stop detection.
@@ -713,6 +737,7 @@ pub(crate) async fn process_recording_batch(
     let key_delay = std::time::Duration::from_millis(context.config.input.key_delay_ms);
     let injector_backend = context.config.input.backend;
     let paste = context.config.input.paste;
+    let clipboard_fallback = context.config.input.clipboard_fallback;
     let is_terminal = if paste {
         context
             .window_tracker
@@ -723,7 +748,14 @@ pub(crate) async fn process_recording_batch(
         false
     };
     match tokio::task::spawn_blocking(move || {
-        inject_text(&text_clone, is_terminal, key_delay, injector_backend, paste)
+        inject_text(
+            &text_clone,
+            is_terminal,
+            key_delay,
+            injector_backend,
+            paste,
+            clipboard_fallback,
+        )
     })
     .await
     {
