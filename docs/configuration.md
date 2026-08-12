@@ -280,6 +280,17 @@ when recording starts, and resumes exactly those when it stops. A tab you paused
 yourself stays paused. If a player's bus name changes mid-session (a browser
 switching media sessions) its resume is skipped rather than guessed at.
 
+To see what a hook printed, filter the journal by identifier, not by unit:
+
+```fish
+journalctl --user -t whisrsd -f
+```
+
+`journalctl --user -u whisrs` will usually **not** show it. Hook output comes from
+the short-lived `sh` child, and journald resolves the owning unit from the sender's
+PID — by the time it looks, a command like `echo hi` has already exited, so the
+line lands in the journal without the unit attached and the `-u` filter drops it.
+
 ### Generate text with no selection
 
 `whisrs command` **rewrites a selection**: highlight some text, press the key,
