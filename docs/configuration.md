@@ -266,14 +266,19 @@ cancel = "Super+Shift+D"
 command = "Super+Shift+G"
 speak = "Super+Shift+R"
 
-# Recording-lifecycle hooks: pause MPRIS playback while dictating, run shell
-# commands fire-and-forget on record start/stop.  The child inherits the
+# Recording-lifecycle hooks: pause playing MPRIS media while dictating, run
+# shell commands fire-and-forget on record start/stop.  The child inherits the
 # daemon's environment and stdout/stderr (journal under systemd --user).
 [hooks]
-media_auto_pause = true        # pause all MPRIS players while recording
+media_auto_pause = true        # pause MPRIS players that are playing, resume those on stop
 # on_record_start = ""         # shell command on recording start
 # on_record_stop = ""          # shell command on recording stop
 ```
+
+`media_auto_pause` only touches players that report `PlaybackStatus = "Playing"`
+when recording starts, and resumes exactly those when it stops. A tab you paused
+yourself stays paused. If a player's bus name changes mid-session (a browser
+switching media sessions) its resume is skipped rather than guessed at.
 
 ### Generate text with no selection
 

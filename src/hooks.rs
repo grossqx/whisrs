@@ -1,6 +1,7 @@
 //! Hooks fired when a recording session starts/stops. Driven by the state
 //! broadcast channel (see [`crate::daemon::hooks::hook_dispatch_loop`]).
 
+use crate::mpris::PlayerState;
 use crate::State;
 use tracing::{debug, warn};
 
@@ -23,6 +24,78 @@ pub fn hook_event_for(prev: State, new: State) -> Option<HookEvent> {
         (prev, State::Recording) if prev != State::Recording => Some(HookEvent::RecordStart),
         (State::Recording, new) if new != State::Recording => Some(HookEvent::RecordStop),
         _ => None,
+    }
+}
+
+/// The MPRIS work one hook event implies. Either list may be empty; an empty
+/// list means "issue no D-Bus calls", not "sweep the bus".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaPlan {
+    /// Bus names to pause, in the order they were seen.
+    pub pause: Vec<String>,
+    /// Bus names to resume. Never contains a player this daemon did not
+    /// pause itself.
+    pub resume: Vec<String>,
+}
+
+/// Remembers which MPRIS players *this daemon* paused, so a recording stop
+/// resumes exactly those. A tab the user paused before dictating is never in
+/// the set, so it is never started for them.
+///
+/// Pure bookkeeping — the D-Bus calls live in [`crate::mpris`] and the daemon
+/// feeds their results back in via [`Self::confirm_paused`].
+#[derive(Debug, Default)]
+pub struct MediaPauseTracker {
+    paused: Vec<String>,
+}
+
+impl MediaPauseTracker {
+    /// A tracker holding nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Plan the MPRIS work for `event`.
+    ///
+    /// `players` is the session-bus snapshot taken at a recording start; it is
+    /// unused for [`HookEvent::RecordStop`], where the plan is exactly the set
+    /// this tracker is still holding. Planning a pause does *not* record it —
+    /// the caller reports back what actually paused via [`Self::confirm_paused`].
+    pub fn plan(&mut self, event: HookEvent, players: &[PlayerState]) -> MediaPlan {
+        match event {
+            // A start with no intervening stop is reachable: the state watch
+            // channel coalesces, so Recording → Idle → Recording can surface as
+            // a bare second start. Keep holding the earlier batch instead of
+            // forgetting it — those players stay paused until a stop arrives.
+            HookEvent::RecordStart => MediaPlan {
+                pause: players
+                    .iter()
+                    .filter(|p| p.playing)
+                    .map(|p| p.name.clone())
+                    .collect(),
+                resume: Vec::new(),
+            },
+            HookEvent::RecordStop => MediaPlan {
+                pause: Vec::new(),
+                resume: std::mem::take(&mut self.paused),
+            },
+        }
+    }
+
+    /// Record the players that actually paused, adding to anything still held
+    /// from an earlier start. A player that failed to pause is simply absent,
+    /// so it is never resumed.
+    pub fn confirm_paused(&mut self, paused: &[String]) {
+        for name in paused {
+            if !self.paused.iter().any(|held| held == name) {
+                self.paused.push(name.clone());
+            }
+        }
+    }
+
+    /// The players currently held paused, in the order they were paused.
+    pub fn held(&self) -> &[String] {
+        &self.paused
     }
 }
 
@@ -126,5 +199,143 @@ mod tests {
         // Should not panic or spawn any child.
         run_hook("");
         run_hook("   ");
+    }
+
+    // -- MediaPauseTracker ---------------------------------------------------
+
+    fn playing(name: &str) -> PlayerState {
+        PlayerState {
+            name: name.to_string(),
+            playing: true,
+        }
+    }
+
+    fn not_playing(name: &str) -> PlayerState {
+        PlayerState {
+            name: name.to_string(),
+            playing: false,
+        }
+    }
+
+    #[test]
+    fn stop_resumes_exactly_what_start_paused() {
+        let mut tracker = MediaPauseTracker::new();
+        let bus = [playing("spotify"), playing("vlc")];
+
+        let start = tracker.plan(HookEvent::RecordStart, &bus);
+        assert_eq!(start.pause, ["spotify", "vlc"]);
+        assert!(start.resume.is_empty(), "a start never resumes");
+        tracker.confirm_paused(&start.pause);
+
+        let stop = tracker.plan(HookEvent::RecordStop, &[]);
+        assert_eq!(stop.resume, ["spotify", "vlc"]);
+        assert!(stop.pause.is_empty(), "a stop never pauses");
+    }
+
+    /// The bug this tracker exists for: a tab the user paused themselves must
+    /// not start playing when dictation ends.
+    #[test]
+    fn a_player_already_paused_is_never_touched() {
+        let mut tracker = MediaPauseTracker::new();
+        let bus = [
+            playing("spotify"),
+            not_playing("firefox"),
+            not_playing("vlc"),
+        ];
+
+        let start = tracker.plan(HookEvent::RecordStart, &bus);
+        assert_eq!(
+            start.pause,
+            ["spotify"],
+            "only the playing player may be paused"
+        );
+        tracker.confirm_paused(&start.pause);
+
+        let stop = tracker.plan(HookEvent::RecordStop, &[]);
+        assert_eq!(
+            stop.resume,
+            ["spotify"],
+            "firefox and vlc were the user's to keep paused"
+        );
+    }
+
+    #[test]
+    fn second_start_without_a_stop_keeps_the_first_batch() {
+        let mut tracker = MediaPauseTracker::new();
+
+        let first = tracker.plan(HookEvent::RecordStart, &[playing("spotify")]);
+        tracker.confirm_paused(&first.pause);
+
+        // The watch channel coalesced a stop away; spotify is still paused by
+        // us, and a new player started in the meantime.
+        let second = tracker.plan(
+            HookEvent::RecordStart,
+            &[not_playing("spotify"), playing("vlc")],
+        );
+        assert_eq!(second.pause, ["vlc"]);
+        tracker.confirm_paused(&second.pause);
+        assert_eq!(tracker.held(), ["spotify", "vlc"]);
+
+        let stop = tracker.plan(HookEvent::RecordStop, &[]);
+        assert_eq!(
+            stop.resume,
+            ["spotify", "vlc"],
+            "the first batch must not be stranded"
+        );
+    }
+
+    #[test]
+    fn a_player_still_playing_at_a_second_start_is_paused_once() {
+        let mut tracker = MediaPauseTracker::new();
+
+        let first = tracker.plan(HookEvent::RecordStart, &[playing("spotify")]);
+        tracker.confirm_paused(&first.pause);
+
+        // The user hit play again mid-recording: pause it, but do not record
+        // it twice or the resume list grows duplicates.
+        let second = tracker.plan(HookEvent::RecordStart, &[playing("spotify")]);
+        assert_eq!(second.pause, ["spotify"]);
+        tracker.confirm_paused(&second.pause);
+
+        assert_eq!(tracker.plan(HookEvent::RecordStop, &[]).resume, ["spotify"]);
+    }
+
+    #[test]
+    fn stop_with_nothing_paused_resumes_nothing() {
+        let mut tracker = MediaPauseTracker::new();
+        let stop = tracker.plan(HookEvent::RecordStop, &[]);
+        assert!(
+            stop.resume.is_empty(),
+            "a stop must never sweep the bus for players to resume"
+        );
+        assert!(stop.pause.is_empty());
+    }
+
+    #[test]
+    fn a_stop_forgets_its_batch() {
+        let mut tracker = MediaPauseTracker::new();
+        tracker.confirm_paused(&["spotify".to_string()]);
+
+        assert_eq!(tracker.plan(HookEvent::RecordStop, &[]).resume, ["spotify"]);
+        assert!(
+            tracker.plan(HookEvent::RecordStop, &[]).resume.is_empty(),
+            "a second stop must not resume the same batch again"
+        );
+        assert!(tracker.held().is_empty());
+    }
+
+    #[test]
+    fn a_pause_that_failed_is_never_resumed() {
+        let mut tracker = MediaPauseTracker::new();
+        let start = tracker.plan(
+            HookEvent::RecordStart,
+            &[playing("spotify"), playing("vlc")],
+        );
+        assert_eq!(start.pause, ["spotify", "vlc"]);
+
+        // vlc refused the Pause call, so the daemon reports only spotify.
+        tracker.confirm_paused(&["spotify".to_string()]);
+
+        assert_eq!(tracker.plan(HookEvent::RecordStop, &[]).resume, ["spotify"]);
     }
 }

@@ -72,14 +72,16 @@ pub struct HotkeyConfig {
     pub speak: Option<String>,
 }
 
-/// Recording-lifecycle hooks. `media_auto_pause` pauses all MPRIS players
-/// while recording and resumes them on stop (no external tools).
-/// `on_record_start`/`on_record_stop` run shell commands fire-and-forget
-/// when a recording session begins/ends.  The child inherits the daemon's
-/// environment and stdout/stderr (goes to the journal under systemd --user).
+/// Recording-lifecycle hooks. `media_auto_pause` pauses the MPRIS players
+/// that are currently playing and resumes exactly those on stop (no external
+/// tools). `on_record_start`/`on_record_stop` run shell commands
+/// fire-and-forget when a recording session begins/ends.  The child inherits
+/// the daemon's environment and stdout/stderr (goes to the journal under
+/// systemd --user).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
-    /// Pause all MPRIS players while recording; resume exactly those on stop.
+    /// Pause the MPRIS players that are playing when recording starts; resume
+    /// exactly those on stop. Media the user paused themselves is left alone.
     #[serde(default)]
     pub media_auto_pause: bool,
     /// Shell command run when recording starts.

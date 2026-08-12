@@ -470,14 +470,15 @@ fn prompt_optional_string(label: &str, current: &Option<String>) -> Result<Optio
 fn edit_media_hooks(config: &mut Config) -> Result<()> {
     println!("\n  {BOLD}Recording hooks{RESET}");
     println!(
-        "  {DIM}Pause MPRIS playback (browsers, Spotify, VLC, MPV, KDE Connect)\n   \
-         while dictating.{RESET}"
+        "  {DIM}Pause MPRIS media that is playing (browsers, Spotify, VLC, MPV,\n   \
+         KDE Connect) while dictating, and resume exactly those afterwards.\n   \
+         Media you paused yourself is left alone.{RESET}"
     );
 
     let mut hooks = config.hooks.clone().unwrap_or_default();
 
     hooks.media_auto_pause = Confirm::new()
-        .with_prompt("Pause MPRIS media while recording?")
+        .with_prompt("Pause playing MPRIS media while recording?")
         .default(hooks.media_auto_pause)
         .interact()
         .unwrap_or(hooks.media_auto_pause);

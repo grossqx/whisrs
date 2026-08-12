@@ -869,7 +869,7 @@ fn write_config_to(config: &Config, config_path: &Path) -> Result<()> {
     // user hasn't configured hooks yet, and only if the hint isn't already
     // present (idempotent: writing twice must produce the same bytes).
     const HOOKS_HINT: &str = "\n# [hooks]\n\
-             # media_auto_pause = true   # pause MPRIS playback while dictating\n\
+             # media_auto_pause = true   # pause playing MPRIS media while dictating, resume it after\n\
              # on_record_start = \"\"     # shell command on recording start\n\
              # on_record_stop = \"\"      # shell command on recording stop\n";
     if config.hooks.is_none() && !output.contains(HOOKS_HINT) {
