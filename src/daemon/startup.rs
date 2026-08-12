@@ -91,6 +91,7 @@ fn default_config() -> Config {
         llm: None,
         tts: None,
         hotkeys: None,
+        hooks: None,
         llm_commands: Vec::new(),
         overlay: None,
     }
@@ -232,6 +233,36 @@ pub(crate) fn check_audio_devices() {
                     warn!("available audio input devices: {}", names.join(", "));
                 }
             }
+        }
+    }
+}
+
+/// Check if the D-Bus session bus is reachable. Required for MPRIS media
+/// pause. Warns once at startup if unavailable.
+#[cfg(feature = "hooks")]
+pub(crate) async fn check_session_bus() {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        zbus::Connection::session(),
+    )
+    .await
+    {
+        Ok(Ok(_)) => info!("D-Bus session bus: available"),
+        Ok(Err(e)) => {
+            warn!(
+                "D-Bus session bus unavailable: {e}\n\
+                 MPRIS media pause will not work.\n\
+                 Install dbus-broker or dbus-daemon and ensure \
+                 DBUS_SESSION_BUS_ADDRESS is set."
+            );
+        }
+        Err(_) => {
+            warn!(
+                "D-Bus session bus connection timed out (5 s)\n\
+                 MPRIS media pause will not work.\n\
+                 Ensure dbus-broker or dbus-daemon is running and \
+                 DBUS_SESSION_BUS_ADDRESS is set."
+            );
         }
     }
 }

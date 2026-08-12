@@ -46,6 +46,9 @@ pub struct Config {
     /// Global hotkey configuration.
     #[serde(default)]
     pub hotkeys: Option<HotkeyConfig>,
+    /// Recording-lifecycle hooks: media pause + shell commands on record start/stop.
+    #[serde(default)]
+    pub hooks: Option<HooksConfig>,
     /// Overlay appearance config (theme, dimensions, optional custom colors).
     #[serde(default)]
     pub overlay: Option<OverlayConfig>,
@@ -69,9 +72,29 @@ pub struct HotkeyConfig {
     pub speak: Option<String>,
 }
 
+/// Recording-lifecycle hooks. `media_auto_pause` pauses the MPRIS players
+/// that are currently playing and resumes exactly those on stop (no external
+/// tools). `on_record_start`/`on_record_stop` run shell commands
+/// fire-and-forget when a recording session begins/ends.  The child inherits
+/// the daemon's environment and stdout/stderr (goes to the journal under
+/// systemd --user).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HooksConfig {
+    /// Pause the MPRIS players that are playing when recording starts; resume
+    /// exactly those on stop. Media the user paused themselves is left alone.
+    #[serde(default)]
+    pub media_auto_pause: bool,
+    /// Shell command run when recording starts.
+    #[serde(default)]
+    pub on_record_start: Option<String>,
+    /// Shell command run when recording stops.
+    #[serde(default)]
+    pub on_record_stop: Option<String>,
+}
+
 /// Visual configuration for the bottom recording overlay.
 ///
-/// The shape is intentionally clamped tight (90–120 × 28–40) to keep the
+/// The shape is intentionally clamped tight (90–120 × 36–48) to keep the
 /// gaussian-tapered bar layout legible. Themes pick the colors; if `colors`
 /// is set, those override the theme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +106,7 @@ pub struct OverlayConfig {
     /// Pill width in pixels (clamped to 90..=120).
     #[serde(default = "default_overlay_width")]
     pub width: u32,
-    /// Pill height in pixels (clamped to 28..=40).
+    /// Pill height in pixels (clamped to 36..=48).
     #[serde(default = "default_overlay_height")]
     pub height: u32,
     /// Custom color overrides; honored when `theme = "custom"`.
@@ -1559,6 +1582,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1605,6 +1629,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1635,6 +1660,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1668,6 +1694,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1708,6 +1735,7 @@ mod tests {
                 llm: None,
                 tts: None,
                 hotkeys: None,
+                hooks: None,
                 llm_commands: Vec::new(),
                 overlay: None,
             };
@@ -1790,6 +1818,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1839,6 +1868,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1894,6 +1924,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1927,6 +1958,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1961,6 +1993,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1995,6 +2028,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2029,6 +2063,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2060,6 +2095,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2133,6 +2169,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2172,6 +2209,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2213,6 +2251,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2279,6 +2318,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2332,6 +2372,7 @@ mod tests {
             }),
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
