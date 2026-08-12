@@ -18,6 +18,20 @@ const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 /// round-trip per player, so a wedged player must not stall recording.
 const SWEEP_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Per-call ceiling. The sweep deadline is only checked *between* players, so
+/// without this a peer that owns its bus name but never replies would block
+/// the hook loop forever: the paused media would never resume and no later
+/// hook would fire for the life of the daemon.
+const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A session-bus connection that cannot hang on an unresponsive peer.
+async fn session_connection() -> zbus::Result<zbus::Connection> {
+    zbus::connection::Builder::session()?
+        .method_timeout(CALL_TIMEOUT)
+        .build()
+        .await
+}
+
 /// One MPRIS player as seen on the session bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerState {
@@ -53,7 +67,7 @@ async fn player_proxy(conn: &zbus::Connection, name: &str) -> zbus::Result<zbus:
 /// is never paused and therefore never resumed — an unreadable player is not
 /// an excuse to start someone's music.
 pub async fn players() -> Vec<PlayerState> {
-    let Ok(conn) = zbus::Connection::session().await else {
+    let Ok(conn) = session_connection().await else {
         debug!("no session bus — MPRIS media pause unavailable");
         return Vec::new();
     };
@@ -110,7 +124,7 @@ pub async fn pause(names: &[String]) -> Vec<String> {
     if names.is_empty() {
         return Vec::new();
     }
-    let Ok(conn) = zbus::Connection::session().await else {
+    let Ok(conn) = session_connection().await else {
         return Vec::new();
     };
 
@@ -149,10 +163,15 @@ pub async fn resume(names: &[String]) {
     if names.is_empty() {
         return;
     }
-    let Ok(conn) = zbus::Connection::session().await else {
+    let Ok(conn) = session_connection().await else {
         return;
     };
+    let deadline = tokio::time::Instant::now() + SWEEP_DEADLINE;
     for name in names {
+        if tokio::time::Instant::now() >= deadline {
+            warn!("MPRIS resume timed out; some players stay paused");
+            break;
+        }
         let Ok(proxy) = player_proxy(&conn, name).await else {
             continue;
         };
