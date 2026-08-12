@@ -224,6 +224,28 @@ pub struct GeneralConfig {
     /// Enable bottom-screen recording overlay.
     #[serde(default)]
     pub overlay: bool,
+    /// Run every finished dictation through the shared `[llm]` backend, using
+    /// [`Self::llm_instruction`], before the text is injected. Off by default,
+    /// so existing setups keep typing the raw transcript.
+    ///
+    /// Unlike `[[llm_commands]]` — which does the same rewrite but needs a
+    /// dedicated hotkey per entry — this is simply on for `whisrs toggle`
+    /// (issue #85). Batch path only, and that is not an oversight: streaming
+    /// backends type partials at the cursor as they arrive, so there is never
+    /// a whole transcript to hand the LLM. [`Config::validate`] warns when
+    /// this is paired with one of them.
+    #[serde(default)]
+    pub llm_post_process: bool,
+    /// Instruction applied to the transcript when [`Self::llm_post_process`]
+    /// is on — the LLM's "voice instruction", the same role an
+    /// `[[llm_commands]]` entry's `instruction` plays.
+    ///
+    /// Deliberately *not* [`Self::prompt`]: that one is a hint for the
+    /// *transcription* backend and never reaches the LLM. Defaults to a
+    /// conservative cleanup pass so flipping the flag alone does something
+    /// sensible; blank means "post-process nothing" (and is warned about).
+    #[serde(default = "default_llm_instruction")]
+    pub llm_instruction: String,
 }
 
 impl Default for GeneralConfig {
@@ -241,6 +263,8 @@ impl Default for GeneralConfig {
             prompt: None,
             tray: true,
             overlay: false,
+            llm_post_process: false,
+            llm_instruction: default_llm_instruction(),
         }
     }
 }
@@ -497,6 +521,15 @@ fn default_device() -> String {
 fn default_audio_feedback_volume() -> f32 {
     0.5
 }
+/// Default toggle-path post-processing instruction. Conservative on purpose:
+/// dictation is content, not a request, so the out-of-the-box behavior is a
+/// cleanup pass that must not reword anything.
+fn default_llm_instruction() -> String {
+    "Fix punctuation, capitalization and obvious transcription errors in the following text. \
+     Keep the wording and the meaning unchanged. Return only the corrected text, with no \
+     explanations and no quotes."
+        .to_string()
+}
 fn default_key_delay_ms() -> u64 {
     2
 }
@@ -558,6 +591,187 @@ pub struct ConfigWarning {
 impl std::fmt::Display for ConfigWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+
+/// One step of a path into a parsed `config.toml` document: a table key or an
+/// index into an array of tables (`[[llm_commands]]`).
+#[derive(Debug, Clone)]
+enum Seg {
+    Key(String),
+    Index(usize),
+}
+
+/// Keys in a parsed `config.toml` document that the configuration schema
+/// does not know.
+///
+/// The known set is derived from serde itself: the parsed [`Config`] is
+/// serialized back into a `toml::Table`, and the two tables are diffed
+/// recursively. A key present in the document but absent from the
+/// reserialization is a *candidate* the running binary may have silently
+/// dropped; `key_is_ignored` then confirms each one by pruning it and
+/// re-parsing. This avoids a hand-maintained field-name list, which would go
+/// stale, and avoids a new dependency.
+///
+/// Returns `[]` when the document is not valid TOML or does not deserialize,
+/// because those cases already produce their own error in the daemon's
+/// `load_config`.
+pub fn unknown_config_keys(contents: &str) -> Vec<String> {
+    let Ok(document) = contents.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Ok(config) = toml::from_str::<Config>(contents) else {
+        return Vec::new();
+    };
+    let Ok(known) = toml::Value::try_from(&config) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    diff_config_tables(
+        &document,
+        known.as_table().expect("Config serializes to a table"),
+        &[],
+        &mut candidates,
+    );
+    // The diff is only a prefilter, so a valid config pays for nothing: with no
+    // candidates there is no second parse.
+    let mut unknown: Vec<String> = candidates
+        .iter()
+        .filter(|path| key_is_ignored(&document, &known, path))
+        .map(|path| render_path(path))
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    unknown
+}
+
+/// Render a path as the dotted form shown to the user (`input.past`,
+/// `llm_commands[0].bogus`).
+fn render_path(path: &[Seg]) -> String {
+    let mut rendered = String::new();
+    for seg in path {
+        match seg {
+            Seg::Key(key) => {
+                if !rendered.is_empty() {
+                    rendered.push('.');
+                }
+                rendered.push_str(key);
+            }
+            Seg::Index(index) => rendered.push_str(&format!("[{index}]")),
+        }
+    }
+    rendered
+}
+
+/// Whether the binary genuinely ignores the key at `path`, decided by removing
+/// it and re-parsing.
+///
+/// The reserialize-and-diff prefilter cannot see `#[serde(alias = "...")]`:
+/// serde accepts the alias but emits the *canonical* name, so every alias key
+/// (`[hotkeys] read`, the `[local]` and `[asr]` sections) is absent from the
+/// reserialized table and looks unknown while actually driving a field. Pruning
+/// settles it — if the config is byte-identical without the key, nothing read
+/// it; if it changes, or the pruned document no longer deserializes, the key
+/// fed a field under a name serde accepts but does not emit. Do not "simplify"
+/// this away: without it the daemon warns about working settings on every start.
+fn key_is_ignored(document: &toml::Table, known: &toml::Value, path: &[Seg]) -> bool {
+    let mut pruned = toml::Value::Table(document.clone());
+    if !prune_path(&mut pruned, path) {
+        // Unreachable — the path came from walking this same document. Keep the
+        // prefilter's verdict rather than silently dropping the warning.
+        return true;
+    }
+    let Ok(config) = pruned.try_into::<Config>() else {
+        return false;
+    };
+    let Ok(reserialized) = toml::Value::try_from(&config) else {
+        return false;
+    };
+    // Compare rendered forms rather than `==`: `toml::Value` equality is float
+    // equality, so a single `nan` in the document (`audio_feedback_volume` is
+    // the one float) would make every comparison false and silence every
+    // warning for the whole file.
+    format!("{reserialized:?}") == format!("{known:?}")
+}
+
+/// Remove the value at `path` from `value`. Returns whether anything was removed.
+fn prune_path(value: &mut toml::Value, path: &[Seg]) -> bool {
+    match path {
+        [] => false,
+        [Seg::Key(key)] => value
+            .as_table_mut()
+            .is_some_and(|table| table.remove(key).is_some()),
+        [Seg::Index(index)] => match value.as_array_mut() {
+            Some(array) if *index < array.len() => {
+                array.remove(*index);
+                true
+            }
+            _ => false,
+        },
+        [Seg::Key(key), rest @ ..] => value
+            .as_table_mut()
+            .and_then(|table| table.get_mut(key))
+            .is_some_and(|inner| prune_path(inner, rest)),
+        [Seg::Index(index), rest @ ..] => value
+            .as_array_mut()
+            .and_then(|array| array.get_mut(*index))
+            .is_some_and(|inner| prune_path(inner, rest)),
+    }
+}
+
+/// Collect every leaf key of `table` (below `prefix`) into `out`.
+fn collect_unknown_leaves(table: &toml::Table, prefix: &[Seg], out: &mut Vec<Vec<Seg>>) {
+    for (key, value) in table {
+        let mut path = prefix.to_vec();
+        path.push(Seg::Key(key.clone()));
+        match value {
+            toml::Value::Table(inner) => collect_unknown_leaves(inner, &path, out),
+            _ => out.push(path),
+        }
+    }
+}
+
+/// Recursively compare a parsed document table against the reserialized
+/// (schema-known) table, appending the paths of candidate unknown keys to `out`.
+fn diff_config_tables(
+    document: &toml::Table,
+    known: &toml::Table,
+    prefix: &[Seg],
+    out: &mut Vec<Vec<Seg>>,
+) {
+    for (key, value) in document {
+        let mut path = prefix.to_vec();
+        path.push(Seg::Key(key.clone()));
+        match known.get(key) {
+            None => match value {
+                // A whole section the schema dropped (e.g. an Option section
+                // whose only keys are unknown): report each leaf, so the user
+                // learns which key inside it is the typo.
+                toml::Value::Table(inner) => collect_unknown_leaves(inner, &path, out),
+                _ => out.push(path),
+            },
+            Some(toml::Value::Table(known_table)) => {
+                if let toml::Value::Table(document_table) = value {
+                    diff_config_tables(document_table, known_table, &path, out);
+                }
+            }
+            Some(toml::Value::Array(known_array)) => {
+                if let toml::Value::Array(document_array) = value {
+                    for (index, item) in document_array.iter().enumerate() {
+                        if let (
+                            toml::Value::Table(document_table),
+                            Some(toml::Value::Table(known_table)),
+                        ) = (item, known_array.get(index))
+                        {
+                            let mut item_path = path.clone();
+                            item_path.push(Seg::Index(index));
+                            diff_config_tables(document_table, known_table, &item_path, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -748,7 +962,9 @@ impl Config {
                 return Err(WhisrsError::Config(format!(
                     "Unknown backend '{other}'. Valid options: deepgram, deepgram-streaming, \
                      groq, openai, openai-realtime, openai-compatible-realtime, \
-                     local-whisper, local-vosk, local-parakeet, asr-sidecar"
+                     local-whisper, asr-sidecar. (local-vosk and local-parakeet are also \
+                     accepted here but are not implemented yet — they fail at transcription \
+                     time, so do not pick one to get out of this error.)"
                 )));
             }
         }
@@ -767,6 +983,12 @@ impl Config {
         // transcribed the instruction: the instruction is never injected, and
         // the LLM result goes out in a single injection call through the same
         // wrapper the batch dictation path uses.
+        //
+        // The "switch to" list must stay limited to backends that actually
+        // transcribe: `local-vosk` and `local-parakeet` parse as valid config
+        // but their `transcribe()` bails with "not yet implemented", so
+        // recommending them would trade a no-op flag for broken dictation.
+        // Keep them out of every recommendation here until they are real.
         if self.input.paste
             && matches!(
                 backend,
@@ -784,10 +1006,65 @@ impl Config {
                      openai-compatible-realtime, local-whisper) type text incrementally as it \
                      arrives and never use the paste path. Command mode output is injected in \
                      one shot, so it still uses paste where that mode is configured. Switch to \
-                     a non-streaming backend (deepgram, groq, openai, local-vosk, \
-                     local-parakeet, asr-sidecar) to use paste injection for dictation too."
+                     a non-streaming backend (deepgram, groq, openai, asr-sidecar) to use \
+                     paste injection for dictation too."
                 ),
             });
+        }
+
+        // Toggle-path LLM post-processing (issue #85). Same shape as the
+        // llm_commands block below — missing [llm] section, empty instruction,
+        // streaming backend — but the failure modes differ, so the wording
+        // does too.
+        if self.general.llm_post_process {
+            if self.llm.is_none() {
+                warnings.push(ConfigWarning {
+                    message: "[general] llm_post_process = true but no [llm] section — add \
+                              [llm] api_key (or set WHISRS_OPENAI_API_KEY / \
+                              WHISRS_GROQ_API_KEY) or every dictation will fall back to the \
+                              raw transcript"
+                        .to_string(),
+                });
+            }
+
+            if self.general.llm_instruction.trim().is_empty() {
+                warnings.push(ConfigWarning {
+                    message: "[general] llm_post_process = true but llm_instruction is empty \
+                              — there is nothing to apply, so dictation is typed unmodified"
+                        .to_string(),
+                });
+            }
+
+            // Same backend list as the `[input] paste` warning above — both
+            // the matched set and the recommended replacements, and for the
+            // same reasons (see the note there on the unimplemented stubs).
+            // With these, dictation never reaches the batch path, so there is
+            // never a whole transcript to post-process. local-whisper belongs
+            // here even though its `transcribe()` is a real batch path (which
+            // is why the llm_commands warning below excludes it) — dictation
+            // with it always streams. Unlike llm_commands there is no degraded
+            // mode: the flag does nothing at all.
+            if matches!(
+                backend,
+                "deepgram-streaming"
+                    | "openai-realtime"
+                    | "openai-compatible-realtime"
+                    | "local-whisper"
+                    | "local"
+            ) {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[general] llm_post_process = true does not apply to dictation with \
+                         backend = \"{backend}\": streaming backends (deepgram-streaming, \
+                         openai-realtime, openai-compatible-realtime, local-whisper) type text \
+                         incrementally as it arrives, so there is never a whole transcript to \
+                         post-process. Nothing runs — dictation is typed unmodified. Switch to \
+                         a non-streaming backend (deepgram, groq, openai, asr-sidecar) to \
+                         post-process dictation, or use an [[llm_commands]] hotkey, which \
+                         works whatever the backend."
+                    ),
+                });
+            }
         }
 
         if !self.llm_commands.is_empty() {
@@ -999,6 +1276,97 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_top_level_key_is_reported() {
+        let unknown = unknown_config_keys("bogus = 1\n[general]\nbackend = \"groq\"\n");
+        assert_eq!(unknown, vec!["bogus"]);
+    }
+
+    #[test]
+    fn unknown_nested_key_reports_full_path() {
+        // The live case from #99: `past` is a typo for `paste`.
+        let unknown = unknown_config_keys("[input]\npast = true\n");
+        assert_eq!(unknown, vec!["input.past"]);
+    }
+
+    #[test]
+    fn unknown_key_in_option_section_is_reported() {
+        let unknown = unknown_config_keys("[deepgram]\napi_key = \"k\"\nbogus = 2\n");
+        assert_eq!(unknown, vec!["deepgram.bogus"]);
+    }
+
+    #[test]
+    fn section_with_only_unknown_keys_reports_leaves() {
+        // A whole section the schema never heard of: every leaf inside it is
+        // reported, nested ones included, so the user sees which key to fix.
+        // (`[deepgram]` can't stand in here — without `api_key` the document
+        // doesn't deserialize at all and nothing is reported.)
+        let unknown = unknown_config_keys("[bogus]\nfoo = 1\n[bogus.nested]\nbar = 2\n");
+        assert_eq!(unknown, vec!["bogus.foo", "bogus.nested.bar"]);
+    }
+
+    #[test]
+    fn hotkey_alias_key_is_not_reported() {
+        // `read` is a serde alias for `speak`, so it works (see
+        // `hotkey_speak_read_alias`) but reserializes as `speak`. The
+        // confirmation pass must clear it instead of warning on every start.
+        let unknown = unknown_config_keys("[hotkeys]\nread = \"Super+Shift+R\"\n");
+        assert!(unknown.is_empty(), "alias key reported: {unknown:?}");
+    }
+
+    #[test]
+    fn alias_sections_are_not_reported() {
+        // `[local]` aliases `[local-whisper]`, `[asr]` aliases `[asr-sidecar]`.
+        let unknown = unknown_config_keys("[local]\nmodel_path = \"/models/ggml.bin\"\n");
+        assert!(unknown.is_empty(), "[local] reported: {unknown:?}");
+
+        let unknown = unknown_config_keys("[asr]\nurl = \"http://127.0.0.1:9999/transcribe\"\n");
+        assert!(unknown.is_empty(), "[asr] reported: {unknown:?}");
+    }
+
+    #[test]
+    fn alias_key_alongside_typo_reports_only_the_typo() {
+        // The confirmation pass must not swallow real unknowns that sit next
+        // to an alias.
+        let unknown =
+            unknown_config_keys("[hotkeys]\nread = \"Super+Shift+R\"\nbogus = \"Super+X\"\n");
+        assert_eq!(unknown, vec!["hotkeys.bogus"]);
+
+        let unknown =
+            unknown_config_keys("[local]\nmodel_path = \"/models/ggml.bin\"\nbogus = 1\n");
+        assert_eq!(unknown, vec!["local.bogus"]);
+    }
+
+    #[test]
+    fn unknown_key_in_llm_command_array_element_is_reported() {
+        let unknown = unknown_config_keys(
+            "[[llm_commands]]\nname = \"x\"\nhotkey = \"Super+T\"\ninstruction = \"y\"\nbogus = 1\n",
+        );
+        assert_eq!(unknown, vec!["llm_commands[0].bogus"]);
+    }
+
+    #[test]
+    fn valid_config_reports_nothing() {
+        let unknown = unknown_config_keys("[general]\nbackend = \"groq\"\n[input]\npaste = true\n");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn invalid_toml_reports_nothing() {
+        let unknown = unknown_config_keys("not [valid toml");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn non_finite_float_does_not_silence_the_report() {
+        // `nan != nan`, so comparing parsed values directly would suppress every
+        // warning in the file, not just the one in this section.
+        let unknown = unknown_config_keys(
+            "[general]\naudio_feedback_volume = nan\nbogus = 1\n[input]\npast = true\n",
+        );
+        assert_eq!(unknown, vec!["general.bogus", "input.past"]);
+    }
 
     #[test]
     fn config_tts_section_roundtrip() {
@@ -1389,6 +1757,21 @@ mod tests {
                 warning.message.contains("Command mode"),
                 "the warning must say command mode still pastes: {}",
                 warning.message
+            );
+            assert_no_stub_backend_advice(&warning.message);
+        }
+    }
+
+    /// `local-vosk` and `local-parakeet` parse as valid config but their
+    /// `transcribe()` bails with "not yet implemented", so a warning that
+    /// tells the user to switch to one trades a no-op setting for dictation
+    /// that does not work at all. No warning may recommend them.
+    fn assert_no_stub_backend_advice(message: &str) {
+        for stub in ["local-vosk", "local-parakeet"] {
+            assert!(
+                !message.contains(stub),
+                "{stub} is an unimplemented stub — recommending it breaks dictation \
+                 outright: {message}"
             );
         }
     }
@@ -2205,6 +2588,163 @@ mod tests {
                 warning.message
             );
         }
+    }
+
+    // ── Toggle-path LLM post-processing (issue #85) ─────────────────────
+
+    #[test]
+    fn general_llm_post_process_defaults_off_with_a_usable_instruction() {
+        // Configs written before the keys existed keep the old behavior.
+        let config: Config = toml::from_str(
+            r#"
+            [general]
+            backend = "groq"
+            "#,
+        )
+        .unwrap();
+        assert!(!config.general.llm_post_process);
+        // The instruction still defaults to something usable, so turning the
+        // flag on alone is a working configuration.
+        assert!(config
+            .general
+            .llm_instruction
+            .contains("Return only the corrected text"));
+    }
+
+    #[test]
+    fn general_llm_post_process_parses_and_roundtrips() {
+        let config: Config = toml::from_str(
+            r#"
+            [general]
+            backend = "groq"
+            llm_post_process = true
+            llm_instruction = "Translate the following text into German. Return only the translation."
+            "#,
+        )
+        .unwrap();
+        assert!(config.general.llm_post_process);
+        assert_eq!(
+            config.general.llm_instruction,
+            "Translate the following text into German. Return only the translation."
+        );
+
+        // Round-trips back out and parses again identically.
+        let serialized = toml::to_string(&config).unwrap();
+        let reparsed: Config = toml::from_str(&serialized).unwrap();
+        assert!(reparsed.general.llm_post_process);
+        assert_eq!(
+            reparsed.general.llm_instruction,
+            config.general.llm_instruction
+        );
+    }
+
+    #[test]
+    fn config_validate_warns_llm_post_process_with_streaming_backend() {
+        // local-whisper is in this list even though it is absent from the
+        // llm_commands one: its transcribe() is a real batch path, but
+        // dictation with it always streams, so the flag no-ops there too.
+        for backend in [
+            "deepgram-streaming",
+            "openai-realtime",
+            "openai-compatible-realtime",
+            "local-whisper",
+        ] {
+            let mut config = validatable_config(backend);
+            config.general.llm_post_process = true;
+
+            let warnings = config.validate().unwrap();
+            let warning = warnings
+                .iter()
+                .find(|w| {
+                    w.message
+                        .contains("[general] llm_post_process = true does not apply")
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "backend {backend} streams dictation, so there is no whole transcript \
+                         to post-process; expected a warning, got: {warnings:?}"
+                    )
+                });
+            assert!(
+                warning
+                    .message
+                    .contains(&format!("backend = \"{backend}\"")),
+                "the warning must name the backend: {}",
+                warning.message
+            );
+            assert!(
+                warning.message.contains("Nothing runs"),
+                "the warning must say the flag does nothing, not that it degrades: {}",
+                warning.message
+            );
+            assert!(
+                warning.message.contains("asr-sidecar"),
+                "the warning must name a backend the user can actually switch to: {}",
+                warning.message
+            );
+            assert_no_stub_backend_advice(&warning.message);
+        }
+    }
+
+    #[test]
+    fn config_validate_no_llm_post_process_warning_for_batch_backend() {
+        for backend in ["groq", "deepgram", "openai"] {
+            let mut config = validatable_config(backend);
+            config.general.llm_post_process = true;
+
+            let warnings = config.validate().unwrap();
+            assert!(
+                warnings.iter().all(|w| !w
+                    .message
+                    .contains("[general] llm_post_process = true does not apply")),
+                "backend {backend} goes through the batch path; no streaming warning expected: \
+                 {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_validate_quiet_when_llm_post_process_is_off() {
+        // The flag is what triggers the warning — a streaming backend on its
+        // own must stay quiet about post-processing.
+        let config = validatable_config("openai-realtime");
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.message.contains("llm_post_process")),
+            "post-processing is off; no warning expected: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn config_validate_warns_llm_post_process_without_llm_section() {
+        let mut config = validatable_config("groq");
+        config.general.llm_post_process = true;
+        config.llm = None;
+
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings.iter().any(|w| w
+                .message
+                .contains("llm_post_process = true but no [llm] section")),
+            "expected a missing-[llm] warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn config_validate_warns_llm_post_process_with_empty_instruction() {
+        let mut config = validatable_config("groq");
+        config.general.llm_post_process = true;
+        config.general.llm_instruction = "   ".to_string();
+
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("llm_instruction is empty")),
+            "expected an empty-instruction warning, got: {warnings:?}"
+        );
     }
 
     #[test]
