@@ -111,6 +111,7 @@ paste = false
 # typing mode (default) the text is copied to the clipboard after typing.
 # Streaming backends (deepgram-streaming, openai-realtime, local-whisper, ...)
 # type incrementally and copy the full final transcript when recording stops.
+# `whisrs cancel` never copies anything, on any backend — cancel discards.
 clipboard_fallback = false
 # Copy-only mode: the final transcript is written to the clipboard and never
 # injected at the cursor — no keystrokes, no Ctrl+V. Overrides paste and

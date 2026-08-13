@@ -129,6 +129,10 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
     // keyboard for every single word delta from the streaming API.
     let wid = window_id.clone();
     let typing_cancel = Arc::clone(&cancel_flag);
+    // Second handle on the same flag: `typing_cancel` is moved into the
+    // batcher, and the clipboard write below still has to know whether the
+    // run ended in a cancel.
+    let clipboard_cancel = Arc::clone(&cancel_flag);
     let typing_task = tokio::spawn(async move {
         // Focus the original window before the first batch (only once).
         // Sequenced by the batcher awaiting each sink call, so a plain
@@ -172,12 +176,22 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
 
         // `[input] clipboard_fallback` / `[input] clipboard_only`: leave the
         // full accumulated transcript in the clipboard once the recording
-        // stops or is cancelled — as a manual-fix fallback for silent
-        // injection failures, or as the only output in copy-only mode (see
+        // stops — as a manual-fix fallback for silent injection failures, or
+        // as the only output in copy-only mode (see
         // `InputConfig::clipboard_fallback` / `::clipboard_only`). Skipped
         // when nothing was typed — copying an empty string would clobber
         // the user's clipboard for nothing.
-        if (clipboard_fallback || clipboard_only) && !full_text.is_empty() {
+        //
+        // `whisrs cancel` discards: it produces no clipboard output either.
+        // The batch path already behaves that way for free (cancel throws the
+        // audio away and `process_recording_batch` never runs), so without
+        // this check the same keypress would leave text in the clipboard on a
+        // streaming backend and nothing on a batch one — the streaming/batch
+        // divergence class from #54.
+        if (clipboard_fallback || clipboard_only)
+            && !full_text.is_empty()
+            && !clipboard_cancel.load(Ordering::SeqCst)
+        {
             let text = full_text.clone();
             match tokio::task::spawn_blocking(move || xkb_type::default_clipboard().set_text(&text))
                 .await
@@ -903,23 +917,29 @@ pub(crate) async fn process_recording_batch(
     // typed, tagged by `history_backend_tag` with whether the LLM produced it.
     let outcome = apply_llm_post_process(text, context).await;
 
-    // Restore window focus.
-    if let Some(wid) = window_id {
-        if let Err(e) = context.window_tracker.focus_window(wid) {
-            warn!("failed to restore window focus: {e}");
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let key_delay = std::time::Duration::from_millis(context.config.input.key_delay_ms);
+    let injector_backend = context.config.input.backend;
+    let paste = context.config.input.paste;
+    let clipboard_fallback = context.config.input.clipboard_fallback;
+    let clipboard_only = context.config.input.clipboard_only;
+
+    // Restore window focus so the injection lands where the user was typing.
+    // Skipped under `[input] clipboard_only`: nothing is injected, so raising
+    // the old window would only yank focus away from wherever the user moved
+    // to (and burn 100 ms doing it). Matches the streaming path's refocus gate.
+    if !clipboard_only {
+        if let Some(wid) = window_id {
+            if let Err(e) = context.window_tracker.focus_window(wid) {
+                warn!("failed to restore window focus: {e}");
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
     }
 
     // Inject the text at the cursor — type keystrokes, or paste via the
     // clipboard when `[input] paste = true` (layout-independent).
     let text_clone = outcome.text.clone();
-    let key_delay = std::time::Duration::from_millis(context.config.input.key_delay_ms);
-    let injector_backend = context.config.input.backend;
-    let paste = context.config.input.paste;
-    let clipboard_fallback = context.config.input.clipboard_fallback;
-    let clipboard_only = context.config.input.clipboard_only;
     let is_terminal = if paste {
         context
             .window_tracker
