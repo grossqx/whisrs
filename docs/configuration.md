@@ -101,6 +101,23 @@ key_delay_ms = 2
 # type incrementally and ignore it. `whisrsd` warns at startup if paste is set
 # with one of those backends.
 paste = false
+# Leave the final transcript in the system clipboard in addition to
+# injecting it at the cursor — a fallback if injection fails silently or
+# produces garbled text, so you can paste and fix manually. Default: false.
+#
+# With paste mode (`paste = true`) the clipboard is normally restored to its
+# previous content right after pasting; with clipboard_fallback set, that
+# restore is skipped and the transcribed text stays in the clipboard. In
+# typing mode (default) the text is copied to the clipboard after typing.
+# Streaming backends (deepgram-streaming, openai-realtime, local-whisper, ...)
+# type incrementally and copy the full final transcript when recording stops.
+# `whisrs cancel` never copies anything, on any backend — cancel discards.
+clipboard_fallback = false
+# Copy-only mode: the final transcript is written to the clipboard and never
+# injected at the cursor — no keystrokes, no Ctrl+V. Overrides paste and
+# clipboard_fallback (both become no-ops). Handy for a "dictate to clipboard"
+# workflow. Default: false.
+clipboard_only = false
 # Extra window classes to treat as terminal emulators, checked alongside the
 # built-in list. Default: [] (built-in list only).
 #

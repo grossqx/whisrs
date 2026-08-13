@@ -336,6 +336,53 @@ pub struct InputConfig {
     /// this is set alongside one of those backends.
     #[serde(default)]
     pub paste: bool,
+    /// Leave the injected text in the system clipboard as a manual-fix
+    /// fallback for silent injection failures. Off by default.
+    ///
+    /// Injection can fail silently: a compositor that drops keystrokes from
+    /// a freshly-created uinput device, a TUI that eats characters, a window
+    /// that loses focus mid-injection. When it does, nothing on screen tells
+    /// you the text was mangled or lost. With this on, the final text is
+    /// always left in the clipboard afterwards, so a single Ctrl+V pastes
+    /// exactly what was dictated and you can correct from there instead of
+    /// re-dictating.
+    ///
+    /// What "afterwards" means per path:
+    /// - Typing mode (`paste = false`): the text is copied after the
+    ///   keystroke injection runs, whether that injection succeeded or
+    ///   failed — the clipboard copy *is* the fallback for the failure case.
+    /// - Paste mode (`paste = true`): pasting already puts the text on the
+    ///   clipboard, so the usual restore of the previous clipboard contents
+    ///   is skipped entirely; the transcribed text simply stays there.
+    /// - Streaming dictation: the full accumulated transcript is copied once
+    ///   the recording stops. `whisrs cancel` copies nothing — cancel
+    ///   discards, and it has to discard identically on both paths (the batch
+    ///   path throws the audio away and never reaches an injection at all).
+    ///
+    /// Trade-off: the clipboard is clobbered on every dictation — anything
+    /// copied beforehand is gone, and it is not restored. That is the point
+    /// of the feature (the fallback only works because the text is there),
+    /// but it also means the clipboard no longer survives a dictation. In
+    /// paste mode a non-text clipboard (an image, a file list) is still
+    /// protected: an unreadable clipboard makes the paste path fall back to
+    /// typing without touching the clipboard, since overwriting content that
+    /// can never be restored is worse than losing the fallback (issue #69).
+    #[serde(default)]
+    pub clipboard_fallback: bool,
+    /// Copy-only mode: the final text is written to the system clipboard
+    /// and never injected at the cursor — no keystrokes, no Ctrl+V.
+    ///
+    /// This is the terminal form of [`Self::clipboard_fallback`]: instead
+    /// of *also* copying after injecting, the clipboard *is* the output.
+    /// Dictation then works like a "dictate to clipboard" tool — record,
+    /// stop, paste wherever you like. Command mode follows the same rule:
+    /// the rewritten text lands in the clipboard and the selection is left
+    /// untouched.
+    ///
+    /// Takes precedence over both `paste` and `clipboard_fallback` (they
+    /// become no-ops), so `whisrsd` never injects while this is set.
+    #[serde(default)]
+    pub clipboard_only: bool,
     /// Extra window classes to treat as terminal emulators, checked alongside
     /// the built-in list. Empty by default.
     ///
@@ -365,6 +412,8 @@ impl Default for InputConfig {
             key_delay_ms: default_key_delay_ms(),
             backend: InjectorBackend::default(),
             paste: false,
+            clipboard_fallback: false,
+            clipboard_only: false,
             terminal_classes: Vec::new(),
         }
     }
@@ -1014,6 +1063,31 @@ impl Config {
             });
         }
 
+        // `[input] clipboard_only` is the terminal form of copy-to-clipboard:
+        // nothing is ever injected, so both of the injection-shaping keys
+        // below are accepted and then ignored. A key that parses fine and
+        // silently does nothing is the failure mode this project warns about
+        // at load time rather than leaving to be discovered in the journal.
+        if self.input.clipboard_only && self.input.paste {
+            warnings.push(ConfigWarning {
+                message: "[input] paste = true is ignored while clipboard_only = true: \
+                          copy-only mode never injects, so there is no paste to perform. \
+                          Set clipboard_only = false to paste at the cursor again."
+                    .to_string(),
+            });
+        }
+
+        if self.input.clipboard_only && self.input.clipboard_fallback {
+            warnings.push(ConfigWarning {
+                message: "[input] clipboard_fallback = true is ignored while \
+                          clipboard_only = true: the fallback copies the text *in addition* \
+                          to injecting it, and copy-only mode already copies it and never \
+                          injects. Set clipboard_only = false to get injection plus the \
+                          clipboard copy."
+                    .to_string(),
+            });
+        }
+
         // Toggle-path LLM post-processing (issue #85). Same shape as the
         // llm_commands block below — missing [llm] section, empty instruction,
         // streaming backend — but the failure modes differ, so the wording
@@ -1278,6 +1352,28 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_input_clipboard_fallback_roundtrip() {
+        // Opt-in: an `[input]` table written before the key existed (or
+        // without it) keeps the current behavior.
+        let absent: InputConfig = toml::from_str("").unwrap();
+        assert!(!absent.clipboard_fallback);
+        assert!(!absent.clipboard_only);
+
+        let cfg: InputConfig =
+            toml::from_str("clipboard_fallback = true\nclipboard_only = true").unwrap();
+        assert!(cfg.clipboard_fallback);
+        assert!(cfg.clipboard_only);
+
+        // Round-trips back out and parses again identically.
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(serialized.contains("clipboard_fallback = true"));
+        assert!(serialized.contains("clipboard_only = true"));
+        let reparsed: InputConfig = toml::from_str(&serialized).unwrap();
+        assert!(reparsed.clipboard_fallback);
+        assert!(reparsed.clipboard_only);
+    }
 
     #[test]
     fn unknown_top_level_key_is_reported() {
@@ -1762,6 +1858,102 @@ mod tests {
             );
             assert_no_stub_backend_advice(&warning.message);
         }
+    }
+
+    /// Build a groq (non-streaming, so no paste/streaming warning of its own)
+    /// config with the given `[input]` section, for the copy-only warnings.
+    fn config_with_input(input: InputConfig) -> Config {
+        Config {
+            general: GeneralConfig {
+                backend: "groq".to_string(),
+                ..Default::default()
+            },
+            audio: Default::default(),
+            input,
+            deepgram: None,
+            groq: Some(GroqConfig {
+                api_key: "test-key".to_string(),
+                model: "whisper-large-v3-turbo".to_string(),
+            }),
+            openai: None,
+            local_whisper: None,
+            local_vosk: None,
+            local_parakeet: None,
+            asr_sidecar: None,
+            openai_compatible_realtime: None,
+            llm: None,
+            tts: None,
+            hotkeys: None,
+            hooks: None,
+            llm_commands: Vec::new(),
+            overlay: None,
+        }
+    }
+
+    #[test]
+    fn config_validate_clipboard_only_with_paste_warns() {
+        let config = config_with_input(InputConfig {
+            paste: true,
+            clipboard_only: true,
+            ..Default::default()
+        });
+        let warnings = config.validate().unwrap();
+        let warning = warnings
+            .iter()
+            .find(|w| w.message.contains("[input] paste = true is ignored"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "clipboard_only never injects, so paste is a silent no-op; \
+                     expected a warning, got: {warnings:?}"
+                )
+            });
+        assert!(
+            warning.message.contains("clipboard_only = true"),
+            "the warning must name the key that overrode paste: {}",
+            warning.message
+        );
+    }
+
+    #[test]
+    fn config_validate_clipboard_only_with_fallback_warns() {
+        let config = config_with_input(InputConfig {
+            clipboard_fallback: true,
+            clipboard_only: true,
+            ..Default::default()
+        });
+        let warnings = config.validate().unwrap();
+        let warning = warnings
+            .iter()
+            .find(|w| {
+                w.message
+                    .contains("[input] clipboard_fallback = true is ignored")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "clipboard_only already copies and never injects, so the fallback is a \
+                     silent no-op; expected a warning, got: {warnings:?}"
+                )
+            });
+        assert!(
+            warning.message.contains("clipboard_only = true"),
+            "the warning must name the key that overrode clipboard_fallback: {}",
+            warning.message
+        );
+    }
+
+    #[test]
+    fn config_validate_clipboard_only_alone_no_warning() {
+        // Copy-only on its own overrides nothing, so it must stay quiet —
+        // these warnings are about *ignored* keys, not about the mode.
+        let config = config_with_input(InputConfig {
+            clipboard_only: true,
+            ..Default::default()
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("is ignored")),
+            "clipboard_only alone overrides nothing and must not warn: {warnings:?}"
+        );
     }
 
     /// `local-vosk` and `local-parakeet` parse as valid config but their

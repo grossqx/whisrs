@@ -52,6 +52,8 @@ pub fn run_config_menu() -> Result<()> {
             "Vocabulary & prompt",
             "Audio device",
             "Keyboard injection (key delay)",
+            "Clipboard fallback (copy transcript to clipboard)",
+            "Clipboard-only mode (no injection)",
             "Hotkeys",
             "Tray & overlay",
             "Recording hooks",
@@ -79,31 +81,33 @@ pub fn run_config_menu() -> Result<()> {
             4 => edit_vocabulary_and_prompt(&mut config)?,
             5 => edit_audio_device(&mut config)?,
             6 => edit_key_delay(&mut config)?,
-            7 => edit_hotkeys(&mut config)?,
-            8 => edit_tray_overlay(&mut config)?,
-            9 => edit_media_hooks(&mut config)?,
-            10 => edit_llm(&mut config)?,
-            11 => edit_llm_commands(&mut config)?,
-            12 => show_config(&config),
-            13 => {
+            7 => edit_clipboard_fallback(&mut config)?,
+            8 => edit_clipboard_only(&mut config)?,
+            9 => edit_hotkeys(&mut config)?,
+            10 => edit_tray_overlay(&mut config)?,
+            11 => edit_media_hooks(&mut config)?,
+            12 => edit_llm(&mut config)?,
+            13 => edit_llm_commands(&mut config)?,
+            14 => show_config(&config),
+            15 => {
                 if open_in_editor(&mut config)? {
                     // External edit already wrote the file; reload and skip the
                     // normal save path so we don't clobber formatting/comments
-                    // the user might have added.
+                    // (see open_in_editor).
                     println!("  {GREEN}Applied edits from $EDITOR.{RESET}");
                 }
             }
-            14 => {
+            16 => {
                 // separator — no-op
             }
-            15 => {
+            17 => {
                 if save_and_restart(&config, fresh)? {
                     return Ok(());
                 }
                 // Validation failed — fall through to next loop iteration,
                 // preserving the in-memory `config` so the user can fix it.
             }
-            16 => {
+            18 => {
                 println!("\n  {DIM}Discarded changes.{RESET}");
                 return Ok(());
             }
@@ -403,6 +407,38 @@ fn edit_key_delay(config: &mut Config) -> Result<()> {
     } else {
         println!("  {YELLOW}Not a number — left unchanged.{RESET}");
     }
+    Ok(())
+}
+
+fn edit_clipboard_fallback(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard fallback{RESET}");
+    println!(
+        "  {DIM}Keep the final transcript in the system clipboard as a fallback, \\\
+         alongside injecting it at the cursor. Use this if injection fails \\\
+         silently or produces garbled text — paste and fix manually.{RESET}"
+    );
+
+    config.input.clipboard_fallback = Confirm::new()
+        .with_prompt("Keep the transcript in the clipboard after dictation?")
+        .default(config.input.clipboard_fallback)
+        .interact()
+        .unwrap_or(config.input.clipboard_fallback);
+    Ok(())
+}
+
+fn edit_clipboard_only(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard-only mode{RESET}");
+    println!(
+        "  {DIM}Copy the transcript to the clipboard without injecting it at \
+         the cursor — no keystrokes, no paste. Overrides paste and \
+         clipboard fallback.{RESET}"
+    );
+
+    config.input.clipboard_only = Confirm::new()
+        .with_prompt("Copy only to the clipboard (no injection)?")
+        .default(config.input.clipboard_only)
+        .interact()
+        .unwrap_or(config.input.clipboard_only);
     Ok(())
 }
 
