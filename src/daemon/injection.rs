@@ -1318,10 +1318,18 @@ mod tests {
     #[test]
     fn paste_with_fallback_keeps_the_pasted_text_in_the_clipboard() {
         let _lock = KEYBOARD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // The pre-paste read sees the user's original text; with the
-        // fallback on there is no read-back and no restore write — the
-        // pasted text stays in the clipboard.
-        let clipboard = Arc::new(ScriptedClipboard::new(&[Some("original")]));
+        // Same script as the restoring sibling test below: the pre-paste save
+        // reads "original", and a read-back — if one happened — would see the
+        // pasted text and therefore restore. With the fallback on, no
+        // read-back happens at all, so the pasted text stays in the clipboard.
+        // Scripting it this way is what makes the assertion load-bearing:
+        // with a sticky "original" the read-back would take the "clipboard
+        // changed, skip restore" arm and the test would pass even with the
+        // fallback logic deleted.
+        let clipboard = Arc::new(ScriptedClipboard::new(&[
+            Some("original"),
+            Some("hello world"),
+        ]));
         let keyboard = MockKeyboard::default();
         let paste_combos = Arc::clone(&keyboard.paste_combos);
 
