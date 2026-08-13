@@ -46,6 +46,9 @@ pub struct Config {
     /// Global hotkey configuration.
     #[serde(default)]
     pub hotkeys: Option<HotkeyConfig>,
+    /// Recording-lifecycle hooks: media pause + shell commands on record start/stop.
+    #[serde(default)]
+    pub hooks: Option<HooksConfig>,
     /// Overlay appearance config (theme, dimensions, optional custom colors).
     #[serde(default)]
     pub overlay: Option<OverlayConfig>,
@@ -69,9 +72,29 @@ pub struct HotkeyConfig {
     pub speak: Option<String>,
 }
 
+/// Recording-lifecycle hooks. `media_auto_pause` pauses the MPRIS players
+/// that are currently playing and resumes exactly those on stop (no external
+/// tools). `on_record_start`/`on_record_stop` run shell commands
+/// fire-and-forget when a recording session begins/ends.  The child inherits
+/// the daemon's environment and stdout/stderr (goes to the journal under
+/// systemd --user).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HooksConfig {
+    /// Pause the MPRIS players that are playing when recording starts; resume
+    /// exactly those on stop. Media the user paused themselves is left alone.
+    #[serde(default)]
+    pub media_auto_pause: bool,
+    /// Shell command run when recording starts.
+    #[serde(default)]
+    pub on_record_start: Option<String>,
+    /// Shell command run when recording stops.
+    #[serde(default)]
+    pub on_record_stop: Option<String>,
+}
+
 /// Visual configuration for the bottom recording overlay.
 ///
-/// The shape is intentionally clamped tight (90–120 × 28–40) to keep the
+/// The shape is intentionally clamped tight (90–120 × 36–48) to keep the
 /// gaussian-tapered bar layout legible. Themes pick the colors; if `colors`
 /// is set, those override the theme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +106,7 @@ pub struct OverlayConfig {
     /// Pill width in pixels (clamped to 90..=120).
     #[serde(default = "default_overlay_width")]
     pub width: u32,
-    /// Pill height in pixels (clamped to 28..=40).
+    /// Pill height in pixels (clamped to 36..=48).
     #[serde(default = "default_overlay_height")]
     pub height: u32,
     /// Custom color overrides; honored when `theme = "custom"`.
@@ -620,6 +643,187 @@ impl std::fmt::Display for ConfigWarning {
     }
 }
 
+/// One step of a path into a parsed `config.toml` document: a table key or an
+/// index into an array of tables (`[[llm_commands]]`).
+#[derive(Debug, Clone)]
+enum Seg {
+    Key(String),
+    Index(usize),
+}
+
+/// Keys in a parsed `config.toml` document that the configuration schema
+/// does not know.
+///
+/// The known set is derived from serde itself: the parsed [`Config`] is
+/// serialized back into a `toml::Table`, and the two tables are diffed
+/// recursively. A key present in the document but absent from the
+/// reserialization is a *candidate* the running binary may have silently
+/// dropped; `key_is_ignored` then confirms each one by pruning it and
+/// re-parsing. This avoids a hand-maintained field-name list, which would go
+/// stale, and avoids a new dependency.
+///
+/// Returns `[]` when the document is not valid TOML or does not deserialize,
+/// because those cases already produce their own error in the daemon's
+/// `load_config`.
+pub fn unknown_config_keys(contents: &str) -> Vec<String> {
+    let Ok(document) = contents.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Ok(config) = toml::from_str::<Config>(contents) else {
+        return Vec::new();
+    };
+    let Ok(known) = toml::Value::try_from(&config) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    diff_config_tables(
+        &document,
+        known.as_table().expect("Config serializes to a table"),
+        &[],
+        &mut candidates,
+    );
+    // The diff is only a prefilter, so a valid config pays for nothing: with no
+    // candidates there is no second parse.
+    let mut unknown: Vec<String> = candidates
+        .iter()
+        .filter(|path| key_is_ignored(&document, &known, path))
+        .map(|path| render_path(path))
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    unknown
+}
+
+/// Render a path as the dotted form shown to the user (`input.past`,
+/// `llm_commands[0].bogus`).
+fn render_path(path: &[Seg]) -> String {
+    let mut rendered = String::new();
+    for seg in path {
+        match seg {
+            Seg::Key(key) => {
+                if !rendered.is_empty() {
+                    rendered.push('.');
+                }
+                rendered.push_str(key);
+            }
+            Seg::Index(index) => rendered.push_str(&format!("[{index}]")),
+        }
+    }
+    rendered
+}
+
+/// Whether the binary genuinely ignores the key at `path`, decided by removing
+/// it and re-parsing.
+///
+/// The reserialize-and-diff prefilter cannot see `#[serde(alias = "...")]`:
+/// serde accepts the alias but emits the *canonical* name, so every alias key
+/// (`[hotkeys] read`, the `[local]` and `[asr]` sections) is absent from the
+/// reserialized table and looks unknown while actually driving a field. Pruning
+/// settles it — if the config is byte-identical without the key, nothing read
+/// it; if it changes, or the pruned document no longer deserializes, the key
+/// fed a field under a name serde accepts but does not emit. Do not "simplify"
+/// this away: without it the daemon warns about working settings on every start.
+fn key_is_ignored(document: &toml::Table, known: &toml::Value, path: &[Seg]) -> bool {
+    let mut pruned = toml::Value::Table(document.clone());
+    if !prune_path(&mut pruned, path) {
+        // Unreachable — the path came from walking this same document. Keep the
+        // prefilter's verdict rather than silently dropping the warning.
+        return true;
+    }
+    let Ok(config) = pruned.try_into::<Config>() else {
+        return false;
+    };
+    let Ok(reserialized) = toml::Value::try_from(&config) else {
+        return false;
+    };
+    // Compare rendered forms rather than `==`: `toml::Value` equality is float
+    // equality, so a single `nan` in the document (`audio_feedback_volume` is
+    // the one float) would make every comparison false and silence every
+    // warning for the whole file.
+    format!("{reserialized:?}") == format!("{known:?}")
+}
+
+/// Remove the value at `path` from `value`. Returns whether anything was removed.
+fn prune_path(value: &mut toml::Value, path: &[Seg]) -> bool {
+    match path {
+        [] => false,
+        [Seg::Key(key)] => value
+            .as_table_mut()
+            .is_some_and(|table| table.remove(key).is_some()),
+        [Seg::Index(index)] => match value.as_array_mut() {
+            Some(array) if *index < array.len() => {
+                array.remove(*index);
+                true
+            }
+            _ => false,
+        },
+        [Seg::Key(key), rest @ ..] => value
+            .as_table_mut()
+            .and_then(|table| table.get_mut(key))
+            .is_some_and(|inner| prune_path(inner, rest)),
+        [Seg::Index(index), rest @ ..] => value
+            .as_array_mut()
+            .and_then(|array| array.get_mut(*index))
+            .is_some_and(|inner| prune_path(inner, rest)),
+    }
+}
+
+/// Collect every leaf key of `table` (below `prefix`) into `out`.
+fn collect_unknown_leaves(table: &toml::Table, prefix: &[Seg], out: &mut Vec<Vec<Seg>>) {
+    for (key, value) in table {
+        let mut path = prefix.to_vec();
+        path.push(Seg::Key(key.clone()));
+        match value {
+            toml::Value::Table(inner) => collect_unknown_leaves(inner, &path, out),
+            _ => out.push(path),
+        }
+    }
+}
+
+/// Recursively compare a parsed document table against the reserialized
+/// (schema-known) table, appending the paths of candidate unknown keys to `out`.
+fn diff_config_tables(
+    document: &toml::Table,
+    known: &toml::Table,
+    prefix: &[Seg],
+    out: &mut Vec<Vec<Seg>>,
+) {
+    for (key, value) in document {
+        let mut path = prefix.to_vec();
+        path.push(Seg::Key(key.clone()));
+        match known.get(key) {
+            None => match value {
+                // A whole section the schema dropped (e.g. an Option section
+                // whose only keys are unknown): report each leaf, so the user
+                // learns which key inside it is the typo.
+                toml::Value::Table(inner) => collect_unknown_leaves(inner, &path, out),
+                _ => out.push(path),
+            },
+            Some(toml::Value::Table(known_table)) => {
+                if let toml::Value::Table(document_table) = value {
+                    diff_config_tables(document_table, known_table, &path, out);
+                }
+            }
+            Some(toml::Value::Array(known_array)) => {
+                if let toml::Value::Array(document_array) = value {
+                    for (index, item) in document_array.iter().enumerate() {
+                        if let (
+                            toml::Value::Table(document_table),
+                            Some(toml::Value::Table(known_table)),
+                        ) = (item, known_array.get(index))
+                        {
+                            let mut item_path = path.clone();
+                            item_path.push(Seg::Index(index));
+                            diff_config_tables(document_table, known_table, &item_path, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Config {
     /// Validate the configuration and return a list of warnings.
     ///
@@ -1145,6 +1349,97 @@ mod tests {
     }
 
     #[test]
+    fn unknown_top_level_key_is_reported() {
+        let unknown = unknown_config_keys("bogus = 1\n[general]\nbackend = \"groq\"\n");
+        assert_eq!(unknown, vec!["bogus"]);
+    }
+
+    #[test]
+    fn unknown_nested_key_reports_full_path() {
+        // The live case from #99: `past` is a typo for `paste`.
+        let unknown = unknown_config_keys("[input]\npast = true\n");
+        assert_eq!(unknown, vec!["input.past"]);
+    }
+
+    #[test]
+    fn unknown_key_in_option_section_is_reported() {
+        let unknown = unknown_config_keys("[deepgram]\napi_key = \"k\"\nbogus = 2\n");
+        assert_eq!(unknown, vec!["deepgram.bogus"]);
+    }
+
+    #[test]
+    fn section_with_only_unknown_keys_reports_leaves() {
+        // A whole section the schema never heard of: every leaf inside it is
+        // reported, nested ones included, so the user sees which key to fix.
+        // (`[deepgram]` can't stand in here — without `api_key` the document
+        // doesn't deserialize at all and nothing is reported.)
+        let unknown = unknown_config_keys("[bogus]\nfoo = 1\n[bogus.nested]\nbar = 2\n");
+        assert_eq!(unknown, vec!["bogus.foo", "bogus.nested.bar"]);
+    }
+
+    #[test]
+    fn hotkey_alias_key_is_not_reported() {
+        // `read` is a serde alias for `speak`, so it works (see
+        // `hotkey_speak_read_alias`) but reserializes as `speak`. The
+        // confirmation pass must clear it instead of warning on every start.
+        let unknown = unknown_config_keys("[hotkeys]\nread = \"Super+Shift+R\"\n");
+        assert!(unknown.is_empty(), "alias key reported: {unknown:?}");
+    }
+
+    #[test]
+    fn alias_sections_are_not_reported() {
+        // `[local]` aliases `[local-whisper]`, `[asr]` aliases `[asr-sidecar]`.
+        let unknown = unknown_config_keys("[local]\nmodel_path = \"/models/ggml.bin\"\n");
+        assert!(unknown.is_empty(), "[local] reported: {unknown:?}");
+
+        let unknown = unknown_config_keys("[asr]\nurl = \"http://127.0.0.1:9999/transcribe\"\n");
+        assert!(unknown.is_empty(), "[asr] reported: {unknown:?}");
+    }
+
+    #[test]
+    fn alias_key_alongside_typo_reports_only_the_typo() {
+        // The confirmation pass must not swallow real unknowns that sit next
+        // to an alias.
+        let unknown =
+            unknown_config_keys("[hotkeys]\nread = \"Super+Shift+R\"\nbogus = \"Super+X\"\n");
+        assert_eq!(unknown, vec!["hotkeys.bogus"]);
+
+        let unknown =
+            unknown_config_keys("[local]\nmodel_path = \"/models/ggml.bin\"\nbogus = 1\n");
+        assert_eq!(unknown, vec!["local.bogus"]);
+    }
+
+    #[test]
+    fn unknown_key_in_llm_command_array_element_is_reported() {
+        let unknown = unknown_config_keys(
+            "[[llm_commands]]\nname = \"x\"\nhotkey = \"Super+T\"\ninstruction = \"y\"\nbogus = 1\n",
+        );
+        assert_eq!(unknown, vec!["llm_commands[0].bogus"]);
+    }
+
+    #[test]
+    fn valid_config_reports_nothing() {
+        let unknown = unknown_config_keys("[general]\nbackend = \"groq\"\n[input]\npaste = true\n");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn invalid_toml_reports_nothing() {
+        let unknown = unknown_config_keys("not [valid toml");
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn non_finite_float_does_not_silence_the_report() {
+        // `nan != nan`, so comparing parsed values directly would suppress every
+        // warning in the file, not just the one in this section.
+        let unknown = unknown_config_keys(
+            "[general]\naudio_feedback_volume = nan\nbogus = 1\n[input]\npast = true\n",
+        );
+        assert_eq!(unknown, vec!["general.bogus", "input.past"]);
+    }
+
+    #[test]
     fn config_tts_section_roundtrip() {
         let config: Config = toml::from_str(
             r#"
@@ -1356,6 +1651,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1402,6 +1698,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1432,6 +1729,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1465,6 +1763,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1505,6 +1804,7 @@ mod tests {
                 llm: None,
                 tts: None,
                 hotkeys: None,
+                hooks: None,
                 llm_commands: Vec::new(),
                 overlay: None,
             };
@@ -1587,6 +1887,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1636,6 +1937,7 @@ mod tests {
             llm: None,
             tts: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
         };
@@ -1691,6 +1993,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1724,6 +2027,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1758,6 +2062,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1792,6 +2097,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1826,6 +2132,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1857,6 +2164,7 @@ mod tests {
             }),
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1930,6 +2238,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: None,
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -1969,6 +2278,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2010,6 +2320,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2076,6 +2387,7 @@ mod tests {
             openai_compatible_realtime: None,
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
@@ -2129,6 +2441,7 @@ mod tests {
             }),
             llm: Some(llm::LlmConfig::default()),
             hotkeys: None,
+            hooks: None,
             llm_commands: Vec::new(),
             overlay: None,
             tts: None,
