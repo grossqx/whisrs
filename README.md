@@ -43,7 +43,7 @@ After install, **press your hotkey** to start recording, **press again** to stop
 
 ### GPU acceleration (local whisper.cpp)
 
-The default build — and every prebuilt tarball — runs local whisper.cpp on the CPU. If you use the `local-whisper` backend, building with a GPU feature moves the model onto your GPU and cuts dictation latency from seconds to near-instant:
+The default build — and every prebuilt tarball that ships whisper.cpp at all — runs it on the CPU. If you use the `local-whisper` backend, building with a GPU feature moves the model onto your GPU and cuts dictation latency from seconds to near-instant:
 
 ```bash
 cargo install whisrs --features vulkan
@@ -92,7 +92,7 @@ RUST_LOG=debug whisrsd
 
 A working Vulkan build names your GPU at load time (for example `ggml_vulkan: Found 1 Vulkan devices: Radeon RX 9070 XT (RADV GFX1201)`) and loads the model onto it.
 
-> **If you installed whisrs from a distro package or the tarball**, `cargo install` writes the new binaries to `~/.cargo/bin` and leaves the old ones in `/usr/local/bin` or `/usr/bin` untouched. Check that your systemd unit still points at the binary you just built — `systemctl --user cat whisrs.service` — and update `ExecStart` (or remove the stale copy) if it doesn't, otherwise you'll keep running the CPU build without noticing.
+> **If you installed whisrs from a distro package or the tarball**, `cargo install` writes the new binaries to `~/.cargo/bin` and leaves the old ones in `/usr/local/bin` or `/usr/bin` untouched. Check that your systemd unit still points at the binary you just built — `systemctl --user show whisrs.service -p ExecStart` — and point `ExecStart` at `~/.cargo/bin/whisrsd` if it doesn't, otherwise you'll keep running the CPU build without noticing. Don't just delete the old binary: `whisrs setup` writes an absolute `ExecStart`, so removing what it points at stops the daemon starting rather than moving it to the new build.
 
 <details>
 <summary><b>Other install methods (pre-built binary, AUR, Cargo, Nix, manual)</b></summary>
