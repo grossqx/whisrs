@@ -209,9 +209,13 @@ impl LocalWhisperBackend {
                                 text_tx.send(new_text).await.ok();
                             }
                         }
-                        Ok((returned, Err(e))) => {
-                            state = returned;
+                        Ok((stale, Err(e))) => {
                             warn!("whisper window inference failed: {e}");
+                            // Free the failed state before allocating its
+                            // replacement, so recovery never needs two states
+                            // resident at once.
+                            drop(stale);
+                            state = create_state(ctx)?;
                         }
                         Err(e) => {
                             warn!("whisper task panicked: {e}");
@@ -301,8 +305,9 @@ fn create_state(ctx: &whisper_rs::WhisperContext) -> anyhow::Result<whisper_rs::
 ///
 /// Each phrase is decoded exactly once with only the static config prompt.
 /// The stream's reusable `state` is taken by value (it has to move into the
-/// blocking task) and handed back on return; if the decode task panics, the
-/// state is lost with it and a fresh one is created to keep the stream going.
+/// blocking task) and handed back on return; if the decode fails or the task
+/// panics, that state is discarded and a fresh one is created to keep the
+/// stream going.
 async fn decode_phrase(
     ctx: &Arc<whisper_rs::WhisperContext>,
     mut state: whisper_rs::WhisperState,
@@ -337,9 +342,12 @@ async fn decode_phrase(
             }
             Ok(state)
         }
-        Ok((state, Err(e))) => {
+        Ok((stale, Err(e))) => {
             warn!("whisper phrase inference failed: {e}");
-            Ok(state)
+            // Free the failed state before allocating its replacement, so
+            // recovery never needs two states resident at once.
+            drop(stale);
+            create_state(ctx)
         }
         Err(e) => {
             warn!("whisper phrase task panicked: {e}");
@@ -364,6 +372,11 @@ fn run_whisper_inference(
 ) -> anyhow::Result<String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
+    // `best_of: 1` is load-bearing beyond decode quality: it keeps whisper.cpp's
+    // decoder count at 1, which is the only reason the library never takes the
+    // path where it frees the state itself and hands back an error. Raising it,
+    // or switching to beam search, needs the error arms above to stop dropping
+    // the returned state.
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
     if language != "auto" {
@@ -379,6 +392,8 @@ fn run_whisper_inference(
     // Decode every buffer independently: carrying decoder context across
     // buffers amplified repetition/invented text (issue #55). The static
     // initial_prompt above is still applied.
+    // Reusing one state across decodes depends on this staying true: it is what
+    // drops the previous decode's text context (see `create_state`).
     params.set_no_context(true);
     // Fall back to a higher temperature sooner when the decoder gets stuck in
     // low-entropy (repetitive) output. whisper.cpp default is 2.4.
