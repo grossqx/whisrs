@@ -403,8 +403,9 @@ pub struct InputConfig {
     /// alone. Write the class exactly as the compositor reports it
     /// (`hyprctl activewindow`, `niri msg focused-window`, `swaymsg -t
     /// get_tree`, `xprop WM_CLASS`). Sway reports `app_id` for Wayland views
-    /// and `window_properties.class` for XWayland ones; on X11 the class is the
-    /// second of the two strings in `WM_CLASS`.
+    /// and `window_properties.class` for XWayland ones, falling back to
+    /// `window_properties.instance`; on X11 the class is the second of the two
+    /// strings in `WM_CLASS`, falling back to the first.
     #[serde(default)]
     pub terminal_classes: Vec<String>,
 }

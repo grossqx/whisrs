@@ -153,7 +153,8 @@ clipboard_only = false
 #   hyprctl activewindow | grep class
 #   niri msg focused-window
 #   swaymsg -t get_tree   (the focused node's app_id for Wayland apps,
-#                          window_properties.class for XWayland ones)
+#                          window_properties.class for XWayland ones, falling
+#                          back to window_properties.instance)
 #   xprop WM_CLASS        (then click the window; the SECOND string is the
 #                          class, and that is the one whisrs reports; when it
 #                          is empty, whisrs falls back to the first string)
@@ -164,7 +165,7 @@ clipboard_only = false
 # key has no effect on either.
 #
 # Sway and X11 started reporting a class in issue #71, so terminal detection
-# now fires on those sessions. Three behaviors change there:
+# now fires on those sessions. Four behaviors change there:
 #   * command mode clears the prompt line with Ctrl+A then Ctrl+K before
 #     injecting. That is right at a shell prompt and wrong inside a TUI; GNU
 #     screen takes Ctrl+A as its prefix, and many tmux users rebind theirs to
@@ -175,6 +176,8 @@ clipboard_only = false
 #     xterm and urxvt do not bind Ctrl+Shift+C. The primary selection is tried
 #     first and covers a highlighted selection, so this affects the fallback
 #     only.
+#   * with `paste = true`, injection sends Ctrl+Shift+V instead of Ctrl+V. This
+#     one is a fix, not a loss: Ctrl+V at a terminal is readline quoted-insert.
 terminal_classes = []
 
 [groq]
