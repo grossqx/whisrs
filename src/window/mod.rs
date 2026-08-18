@@ -20,9 +20,16 @@ pub trait WindowTracker: Send + Sync {
 
     /// Get the window class of the currently focused window (e.g. "Alacritty", "firefox").
     /// Returns `None` if the compositor does not support this query.
-    fn get_focused_window_class(&self) -> Option<String> {
-        None
-    }
+    ///
+    /// Implemented on Hyprland, Niri, Sway and X11. Returns `None` on KDE and
+    /// GNOME (`DbusTracker`), which have no unprivileged query for the focused
+    /// window class yet (issue #72).
+    ///
+    /// Deliberately required, with no default: a defaulted `None` here silently
+    /// disabled terminal detection on four platforms until #71, because every
+    /// new tracker inherited the gap without a compile error. A backend that
+    /// cannot answer has to say so with an explicit `None`.
+    fn get_focused_window_class(&self) -> Option<String>;
 }
 
 /// A no-op tracker that always succeeds without doing anything.
@@ -38,6 +45,11 @@ impl WindowTracker for NoopTracker {
     fn focus_window(&self, _id: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// No compositor was detected, so there is no focused window to report.
+    fn get_focused_window_class(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Auto-detect the compositor and return the appropriate `WindowTracker`.
@@ -47,7 +59,8 @@ impl WindowTracker for NoopTracker {
 /// 2. `$NIRI_SOCKET` → Niri
 /// 3. `$SWAYSOCK` → Sway
 /// 4. `$XDG_SESSION_TYPE == x11` → X11
-/// 5. Fallback → NoopTracker
+/// 5. `$XDG_CURRENT_DESKTOP` contains gnome or kde → DbusTracker
+/// 6. Fallback → NoopTracker
 pub fn detect_tracker() -> Box<dyn WindowTracker> {
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
         info!("detected Hyprland compositor for window tracking");

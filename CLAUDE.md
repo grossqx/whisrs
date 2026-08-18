@@ -181,7 +181,7 @@ unknown-key warning stays quiet.
 - Serde for all serialization: JSON for IPC, TOML for config
 - Length-prefixed JSON over Unix socket for IPC (4-byte big-endian length + JSON body)
 - All platform-specific behavior behind traits (`KeyInjector`, `WindowTracker`, `ClipboardBackend`)
-- **A trait method with a useful default is a trap.** `WindowTracker::get_focused_window_class()` defaults to `None` and is overridden only by Hyprland and Niri, so `is_terminal` is silently false on KDE, GNOME, Sway and X11. Prefer a required method, or check every implementor.
+- **A trait method with a useful default is a trap. Prefer a required method, or check every implementor.** Case study: `WindowTracker::get_focused_window_class()` defaulted to `None` and only Hyprland and Niri overrode it, so `is_terminal` was silently false on KDE, GNOME, Sway and X11 until #71. The method is required now, Sway and X11 implement it, and KDE/GNOME return an explicit `None` (issue #72), so a new tracker cannot inherit the gap without a compile error.
 - **Wire new features into both transcription paths.** A feature added only to `run_streaming_pipeline` silently no-ops for batch backends (`groq`, `openai`/`deepgram` REST, `asr-sidecar`). This shipped as a bug in #54.
 - Config structs derive both `Serialize` and `Deserialize` for read/write
 

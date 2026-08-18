@@ -1,10 +1,11 @@
 //! D-Bus window tracking stub for GNOME and KDE.
 //!
-//! GNOME requires the `window-calls` extension, and KDE requires KWin scripting.
-//! Both are limited and not yet fully implemented. This module provides a stub
-//! that returns clear error messages.
+//! Neither desktop exposes focus tracking to an unprivileged daemon out of the
+//! box: GNOME needs a shell extension, and KDE needs the
+//! `org_kde_plasma_window_management` Wayland protocol. Tracked in issue #72.
+//! This module provides a stub that returns clear error messages.
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::WindowTracker;
 
@@ -38,5 +39,20 @@ impl WindowTracker for DbusTracker {
         );
         // Don't fail — graceful degradation.
         Ok(())
+    }
+
+    /// Always `None`: KDE would need the `org_kde_plasma_window_management`
+    /// Wayland protocol and GNOME needs a shell extension (issue #72), so
+    /// neither can report the focused window class here yet.
+    ///
+    /// Logged at `debug!` rather than the `warn!` the other two methods use:
+    /// this is queried on every injection, and the other backends log their
+    /// class lookups at `debug!` too.
+    fn get_focused_window_class(&self) -> Option<String> {
+        debug!(
+            "{} focused window class not yet supported; terminal detection stays off",
+            self.desktop
+        );
+        None
     }
 }

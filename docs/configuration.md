@@ -152,8 +152,25 @@ clipboard_only = false
 # Read the class off your compositor:
 #   hyprctl activewindow | grep class
 #   niri msg focused-window
-# Hyprland and Niri are also the only window trackers that report a class
-# today, so this key has no effect on KDE, GNOME, Sway or X11 (issue #71).
+#   swaymsg -t get_tree   (the focused node's app_id for Wayland apps,
+#                          window_properties.class for XWayland ones)
+#   xprop WM_CLASS        (then click the window; the SECOND string is the
+#                          class, and that is the one whisrs reports)
+#
+# A class is reported on Hyprland, Niri, Sway and X11. KDE and GNOME report
+# none, so this key has no effect there (issue #72).
+#
+# Sway and X11 started reporting a class in issue #71, so terminal detection
+# now fires on those sessions. Three behaviors change there:
+#   * command mode clears the prompt line with Ctrl+A then Ctrl+K before
+#     injecting. That is right at a shell prompt and wrong inside a TUI; tmux
+#     binds Ctrl+A as its prefix by default.
+#   * a multi-line LLM reply is refused at a terminal and kept in `whisrs log`
+#     instead of being typed, including inside a terminal-hosted editor.
+#   * the selection copy fallback sends Ctrl+Shift+C instead of Ctrl+C. Stock
+#     xterm and urxvt do not bind Ctrl+Shift+C. The primary selection is tried
+#     first and covers a highlighted selection, so this affects the fallback
+#     only.
 terminal_classes = []
 
 [groq]
@@ -373,7 +390,7 @@ wrongly costs you one `whisrs log` lookup where injecting wrongly runs commands
 you never read, so it refuses either way.
 
 Terminal detection needs the compositor to report the focused window class,
-which today means Hyprland and Niri. On KDE, GNOME, Sway and X11 a terminal is
+which today means Hyprland, Niri, Sway and X11. On KDE and GNOME a terminal is
 treated as an ordinary target, so a multi-line reply is typed there. Add any
 class the built-in list misses to `[input] terminal_classes`.
 

@@ -391,15 +391,13 @@ async fn command_mode_background_inner(
     // further down.
     //
     // `is_terminal` can only ever be true where
-    // `WindowTracker::get_focused_window_class()` is actually implemented,
-    // which is Hyprland (`src/window/hyprland.rs:59`) and Niri
-    // (`src/window/niri.rs:79`). `src/window/mod.rs:23` defaults it to `None`,
-    // so on KWin, GNOME, Sway and X11 it stays false and terminals there fall
-    // back to plain injection at the cursor (and to plain Ctrl+V on the paste
-    // branch). Tracked in issues #70 and #71; not fixed here. The practical
-    // consequence for the gate is that on those compositors a multi-line reply
-    // is typed into a terminal rather than refused — the same exposure the
-    // line-clear already has.
+    // `WindowTracker::get_focused_window_class()` is implemented, which is
+    // Hyprland, Niri, Sway and X11. It still returns `None` on KWin and GNOME
+    // (`src/window/dbus.rs`, issue #72), so there it stays false and terminals
+    // fall back to plain injection at the cursor (and to plain Ctrl+V on the
+    // paste branch). The practical consequence for the gate is that on those
+    // two desktops a multi-line reply is typed into a terminal rather than
+    // refused, the same exposure the line-clear already has.
     let is_terminal = context
         .window_tracker
         .get_focused_window_class()
@@ -888,9 +886,9 @@ async fn llm_command_background_inner(
     }
 
     // Resolved unconditionally, not just on the paste branch: the multi-line
-    // gate needs it too. Same #70/#71 caveat as command mode — only Hyprland
-    // and Niri implement `get_focused_window_class()`, so elsewhere this stays
-    // false and a terminal there is treated as an ordinary target.
+    // gate needs it too. Same caveat as command mode: `get_focused_window_class()`
+    // returns `None` on KWin and GNOME (issue #72), so this stays false there
+    // and a terminal is treated as an ordinary target.
     let is_terminal = context
         .window_tracker
         .get_focused_window_class()
