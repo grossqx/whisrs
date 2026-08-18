@@ -12,6 +12,9 @@
 //! The legacy sliding-window mode (`segmentation = "window"`) keeps the
 //! 8s/2s overlapping windows with text-based n-gram overlap removal
 //! (`asr_dedup::TextDedup`) for lower-latency partial output.
+//!
+//! Both streaming modes create one decoder state per stream and reuse it
+//! across decodes; see [`create_state`].
 
 use std::sync::Arc;
 
@@ -132,17 +135,18 @@ impl LocalWhisperBackend {
     ) -> anyhow::Result<()> {
         let mut splitter =
             PhraseSplitter::new(SAMPLE_RATE, SILENCE_THRESHOLD, self.phrase_silence_ms);
+        let mut state = create_state(ctx)?;
 
         while let Some(chunk) = audio_rx.recv().await {
             for phrase in splitter.feed(&chunk) {
-                decode_phrase(ctx, phrase, config, &text_tx).await;
+                state = decode_phrase(ctx, state, phrase, config, &text_tx).await?;
             }
         }
 
         // End of stream: flush the trailing in-progress phrase (if any),
         // exactly once. No rewind, no overlap re-send.
         if let Some(phrase) = splitter.flush() {
-            decode_phrase(ctx, phrase, config, &text_tx).await;
+            decode_phrase(ctx, state, phrase, config, &text_tx).await?;
         }
 
         Ok(())
@@ -162,6 +166,7 @@ impl LocalWhisperBackend {
         let mut last_processed_end: usize = 0;
         // Static vocabulary prompt only — never prior transcription output.
         let prompt = config.prompt.clone().filter(|p| !p.is_empty());
+        let mut state = create_state(ctx)?;
 
         while let Some(chunk) = audio_rx.recv().await {
             buffer.extend_from_slice(&chunk);
@@ -180,16 +185,23 @@ impl LocalWhisperBackend {
                 // Skip silent windows.
                 if !audio_silence_gate::is_silent(&window, SILENCE_THRESHOLD) {
                     let samples_f32 = i16_to_f32(&window);
-                    let ctx_clone = Arc::clone(ctx);
                     let lang = config.language.clone();
                     let prompt = prompt.clone();
+                    let mut decode_state = state;
 
                     match tokio::task::spawn_blocking(move || {
-                        run_whisper_inference(&ctx_clone, &samples_f32, &lang, prompt.as_deref())
+                        let result = run_whisper_inference(
+                            &mut decode_state,
+                            &samples_f32,
+                            &lang,
+                            prompt.as_deref(),
+                        );
+                        (decode_state, result)
                     })
                     .await
                     {
-                        Ok(Ok(full_text)) => {
+                        Ok((returned, Ok(full_text))) => {
+                            state = returned;
                             // Use text-based dedup to extract only the new portion.
                             let new_text = dedup.filter_text(&full_text);
                             if !new_text.trim().is_empty() {
@@ -197,8 +209,20 @@ impl LocalWhisperBackend {
                                 text_tx.send(new_text).await.ok();
                             }
                         }
-                        Ok(Err(e)) => warn!("whisper window inference failed: {e}"),
-                        Err(e) => warn!("whisper task panicked: {e}"),
+                        Ok((stale, Err(e))) => {
+                            warn!("whisper window inference failed: {e}");
+                            // Free the failed state before allocating its
+                            // replacement, so recovery never needs two states
+                            // resident at once.
+                            drop(stale);
+                            state = create_state(ctx)?;
+                        }
+                        Err(e) => {
+                            warn!("whisper task panicked: {e}");
+                            // The state died with the panicked task; make a
+                            // fresh one so later windows can still decode.
+                            state = create_state(ctx)?;
+                        }
                     }
                 } else {
                     debug!(
@@ -224,22 +248,29 @@ impl LocalWhisperBackend {
             if !remaining.is_empty() && !audio_silence_gate::is_silent(remaining, SILENCE_THRESHOLD)
             {
                 let samples_f32 = i16_to_f32(remaining);
-                let ctx_clone = Arc::clone(ctx);
                 let lang = config.language.clone();
                 let prompt = prompt.clone();
+                // Final decode of the stream — the state is consumed.
+                let mut decode_state = state;
 
                 match tokio::task::spawn_blocking(move || {
-                    run_whisper_inference(&ctx_clone, &samples_f32, &lang, prompt.as_deref())
+                    let result = run_whisper_inference(
+                        &mut decode_state,
+                        &samples_f32,
+                        &lang,
+                        prompt.as_deref(),
+                    );
+                    (decode_state, result)
                 })
                 .await
                 {
-                    Ok(Ok(full_text)) => {
+                    Ok((_, Ok(full_text))) => {
                         let new_text = dedup.filter_text(&full_text);
                         if !new_text.trim().is_empty() {
                             text_tx.send(new_text).await.ok();
                         }
                     }
-                    Ok(Err(e)) => warn!("whisper final inference failed: {e}"),
+                    Ok((_, Err(e))) => warn!("whisper final inference failed: {e}"),
                     Err(e) => warn!("whisper final task panicked: {e}"),
                 }
             }
@@ -258,15 +289,32 @@ fn i16_to_f32(samples: &[i16]) -> Vec<f32> {
         .collect()
 }
 
+/// Create a decoder state for a stream (or a single batch call).
+///
+/// Creating a state allocates all of whisper.cpp's KV and compute buffers —
+/// on GPU backends that is a full device buffer build — so it must happen
+/// once per stream and be reused across decodes, never once per phrase.
+/// Reuse carries no decoder context between phrases: every decode sets
+/// `set_no_context(true)` (see [`run_whisper_inference`]).
+fn create_state(ctx: &whisper_rs::WhisperContext) -> anyhow::Result<whisper_rs::WhisperState> {
+    ctx.create_state()
+        .map_err(|e| anyhow::anyhow!("failed to create whisper state: {e}"))
+}
+
 /// Decode a single phrase and send its trimmed text over `text_tx`.
 ///
 /// Each phrase is decoded exactly once with only the static config prompt.
+/// The stream's reusable `state` is taken by value (it has to move into the
+/// blocking task) and handed back on return; if the decode fails or the task
+/// panics, that state is discarded and a fresh one is created to keep the
+/// stream going.
 async fn decode_phrase(
     ctx: &Arc<whisper_rs::WhisperContext>,
+    mut state: whisper_rs::WhisperState,
     mut phrase: Vec<i16>,
     config: &TranscriptionConfig,
     text_tx: &mpsc::Sender<String>,
-) {
+) -> anyhow::Result<whisper_rs::WhisperState> {
     debug!(
         "decoding phrase of {:.2}s",
         phrase.len() as f64 / SAMPLE_RATE as f64
@@ -277,44 +325,58 @@ async fn decode_phrase(
     }
 
     let samples_f32 = i16_to_f32(&phrase);
-    let ctx = Arc::clone(ctx);
     let lang = config.language.clone();
     let prompt = config.prompt.clone().filter(|p| !p.is_empty());
 
     match tokio::task::spawn_blocking(move || {
-        run_whisper_inference(&ctx, &samples_f32, &lang, prompt.as_deref())
+        let result = run_whisper_inference(&mut state, &samples_f32, &lang, prompt.as_deref());
+        (state, result)
     })
     .await
     {
-        Ok(Ok(text)) => {
+        Ok((state, Ok(text))) => {
             let text = text.trim();
             if !text.is_empty() {
                 debug!("phrase produced: {:?}", text);
                 text_tx.send(text.to_string()).await.ok();
             }
+            Ok(state)
         }
-        Ok(Err(e)) => warn!("whisper phrase inference failed: {e}"),
-        Err(e) => warn!("whisper phrase task panicked: {e}"),
+        Ok((stale, Err(e))) => {
+            warn!("whisper phrase inference failed: {e}");
+            // Free the failed state before allocating its replacement, so
+            // recovery never needs two states resident at once.
+            drop(stale);
+            create_state(ctx)
+        }
+        Err(e) => {
+            warn!("whisper phrase task panicked: {e}");
+            create_state(ctx)
+        }
     }
 }
 
 /// Run whisper inference on an audio buffer.
 ///
+/// - `state`: a reusable decoder state (see [`create_state`]). Reuse carries
+///   no context between calls: `set_no_context(true)` below decodes every
+///   buffer independently.
 /// - `prompt`: the static vocabulary/context hint from the user's config.
 ///   Never prior transcription output — feeding decoded text back as the
 ///   prompt caused the repetition loops of issue #55.
 fn run_whisper_inference(
-    ctx: &whisper_rs::WhisperContext,
+    state: &mut whisper_rs::WhisperState,
     audio: &[f32],
     language: &str,
     prompt: Option<&str>,
 ) -> anyhow::Result<String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
-    let mut state = ctx
-        .create_state()
-        .map_err(|e| anyhow::anyhow!("failed to create whisper state: {e}"))?;
-
+    // `best_of: 1` is load-bearing beyond decode quality: it keeps whisper.cpp's
+    // decoder count at 1, which is the only reason the library never takes the
+    // path where it frees the state itself and hands back an error. Raising it,
+    // or switching to beam search, needs the error arms above to stop dropping
+    // the returned state.
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
     if language != "auto" {
@@ -330,6 +392,8 @@ fn run_whisper_inference(
     // Decode every buffer independently: carrying decoder context across
     // buffers amplified repetition/invented text (issue #55). The static
     // initial_prompt above is still applied.
+    // Reusing one state across decodes depends on this staying true: it is what
+    // drops the previous decode's text context (see `create_state`).
     params.set_no_context(true);
     // Fall back to a higher temperature sooner when the decoder gets stuck in
     // low-entropy (repetitive) output. whisper.cpp default is 2.4.
@@ -387,7 +451,8 @@ impl TranscriptionBackend for LocalWhisperBackend {
         let prompt = config.prompt.clone();
 
         tokio::task::spawn_blocking(move || {
-            run_whisper_inference(&ctx, &samples_f32, &language, prompt.as_deref())
+            let mut state = create_state(&ctx)?;
+            run_whisper_inference(&mut state, &samples_f32, &language, prompt.as_deref())
         })
         .await?
     }
