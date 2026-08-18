@@ -23,7 +23,8 @@ pub trait WindowTracker: Send + Sync {
     ///
     /// Implemented on Hyprland, Niri, Sway and X11. Returns `None` on KDE and
     /// GNOME (`DbusTracker`), which have no unprivileged query for the focused
-    /// window class yet (issue #72).
+    /// window class yet: GNOME needs a shell extension (issue #72), KDE the
+    /// `org_kde_plasma_window_management` Wayland protocol.
     ///
     /// Deliberately required, with no default: a defaulted `None` here silently
     /// disabled terminal detection on four platforms until #71, because every

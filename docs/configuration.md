@@ -155,16 +155,20 @@ clipboard_only = false
 #   swaymsg -t get_tree   (the focused node's app_id for Wayland apps,
 #                          window_properties.class for XWayland ones)
 #   xprop WM_CLASS        (then click the window; the SECOND string is the
-#                          class, and that is the one whisrs reports)
+#                          class, and that is the one whisrs reports; when it
+#                          is empty, whisrs falls back to the first string)
 #
-# A class is reported on Hyprland, Niri, Sway and X11. KDE and GNOME report
-# none, so this key has no effect there (issue #72).
+# A class is reported on Hyprland, Niri, Sway and X11. GNOME reports none
+# without a shell extension (issue #72), and KDE reports none because whisrs
+# does not speak the org_kde_plasma_window_management Wayland protocol, so this
+# key has no effect on either.
 #
 # Sway and X11 started reporting a class in issue #71, so terminal detection
 # now fires on those sessions. Three behaviors change there:
 #   * command mode clears the prompt line with Ctrl+A then Ctrl+K before
-#     injecting. That is right at a shell prompt and wrong inside a TUI; tmux
-#     binds Ctrl+A as its prefix by default.
+#     injecting. That is right at a shell prompt and wrong inside a TUI; GNU
+#     screen takes Ctrl+A as its prefix, and many tmux users rebind theirs to
+#     match.
 #   * a multi-line LLM reply is refused at a terminal and kept in `whisrs log`
 #     instead of being typed, including inside a terminal-hosted editor.
 #   * the selection copy fallback sends Ctrl+Shift+C instead of Ctrl+C. Stock

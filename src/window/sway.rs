@@ -134,9 +134,7 @@ fn find_focused(node: &swayipc::Node) -> Option<&swayipc::Node> {
 /// classified differently depending on which compositor the user is running.
 /// `is_terminal_class` (`src/daemon/injection.rs`) lowercases before matching,
 /// so case alone is harmless — but the two fields are not case variants of one
-/// another. Foot reports instance `footclient` against class `foot-server`, and
-/// only one of those is in the terminal list, so the field choice decides the
-/// answer.
+/// another in general, so which one gets reported can decide the verdict.
 ///
 /// A candidate that trims to empty is skipped rather than returned, so a view
 /// that advertises an empty `app_id` still gets its XWayland properties

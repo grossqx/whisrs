@@ -108,6 +108,41 @@ fn parse_wm_class(class_bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Which half of a `WM_CLASS` property a resolved class came from.
+#[derive(Debug, PartialEq, Eq)]
+enum ClassField {
+    /// The class (second) half — the normal case.
+    Class,
+    /// The instance (first) half, used only when the class half is unusable.
+    Instance,
+}
+
+/// Resolve a whole `WM_CLASS` property into a usable class string.
+///
+/// Contract: the **class** (second) field wins, falling back to the
+/// **instance** (first) field only when the class is empty or absent, and
+/// `None` when neither yields anything. This matches the Sway backend, whose
+/// XWayland fallback reads `window_properties.class` first; the two have to
+/// agree, or the same terminal gets classified differently depending on which
+/// compositor the user happens to be running.
+///
+/// `is_terminal_class` (`src/daemon/injection.rs`) lowercases before matching,
+/// so case alone is harmless — but the two fields are not case variants of one
+/// another in general, so which one gets reported can decide the verdict.
+///
+/// Returns the field it used alongside the class, because the caller logs the
+/// instance fallback differently from a plain class hit.
+///
+/// Pure: takes an already-fetched property, so the precedence is unit-testable
+/// without a display.
+fn class_from_wm_class(wm_class: &WmClass) -> Option<(String, ClassField)> {
+    if let Some(class) = parse_wm_class(wm_class.class()) {
+        return Some((class, ClassField::Class));
+    }
+
+    parse_wm_class(wm_class.instance()).map(|instance| (instance, ClassField::Instance))
+}
+
 impl WindowTracker for X11Tracker {
     fn get_focused_window(&self) -> anyhow::Result<String> {
         let window_id = self.active_window()?;
@@ -118,17 +153,9 @@ impl WindowTracker for X11Tracker {
 
     /// Report the focused window's `WM_CLASS`.
     ///
-    /// Contract: the **class** (second) field wins, falling back to the
-    /// **instance** (first) field only when the class is empty or absent. This
-    /// matches the Sway backend, whose XWayland fallback reads
-    /// `window_properties.class` first; the two have to agree, or the same
-    /// terminal gets classified differently depending on which compositor the
-    /// user happens to be running.
-    ///
-    /// `is_terminal_class` (`src/daemon/injection.rs`) lowercases before
-    /// matching, so case is irrelevant here — but the choice of field is
-    /// load-bearing, because `foot-server` is deliberately not a terminal
-    /// while `footclient` is.
+    /// The class-before-instance precedence lives in `class_from_wm_class`;
+    /// this fetches the property and turns the outcome into the right
+    /// `debug!` line.
     fn get_focused_window_class(&self) -> Option<String> {
         let window_id = match self.active_window() {
             Ok(window_id) => window_id,
@@ -156,18 +183,20 @@ impl WindowTracker for X11Tracker {
             }
         };
 
-        if let Some(class) = parse_wm_class(wm_class.class()) {
-            debug!("X11 focused window class: {class}");
-            return Some(class);
+        match class_from_wm_class(&wm_class) {
+            Some((class, ClassField::Class)) => {
+                debug!("X11 focused window class: {class}");
+                Some(class)
+            }
+            Some((instance, ClassField::Instance)) => {
+                debug!("X11 focused window class: {instance} (class field empty, used instance)");
+                Some(instance)
+            }
+            None => {
+                debug!("X11 focused window class: empty (WM_CLASS has neither class nor instance)");
+                None
+            }
         }
-
-        if let Some(instance) = parse_wm_class(wm_class.instance()) {
-            debug!("X11 focused window class: {instance} (class field empty, used instance)");
-            return Some(instance);
-        }
-
-        debug!("X11 focused window class: empty (WM_CLASS has neither class nor instance)");
-        None
     }
 
     fn focus_window(&self, id: &str) -> anyhow::Result<()> {
@@ -205,6 +234,13 @@ mod tests {
         }
     }
 
+    /// Split a raw `WM_CLASS` property the way `WmClass::get` would.
+    fn wm_class_from(value: &[u8]) -> WmClass {
+        WmClass::from_reply(wm_class_reply(value))
+            .expect("WM_CLASS reply should parse")
+            .expect("STRING-typed reply should yield a WmClass")
+    }
+
     #[test]
     fn parses_a_plain_class() {
         assert_eq!(parse_wm_class(b"Alacritty"), Some("Alacritty".to_string()));
@@ -220,10 +256,11 @@ mod tests {
 
     #[test]
     fn truncates_at_the_first_interior_nul() {
-        // A malformed WM_CLASS with more than two fields: x11rb hands back
-        // everything after the first NUL verbatim (b"World\0Good\0Day"), which
-        // could never match a terminal-list entry. We tighten that to the
-        // first field.
+        // A malformed WM_CLASS with more than two fields, raw property
+        // b"Hello\0World\0Good\0Day": x11rb splits at the first NUL only, so
+        // the class half reaches parse_wm_class as the bytes below, interior
+        // NULs intact. A string holding a NUL could never match a terminal-list
+        // entry, so we cut at the first one and keep the leading field.
         assert_eq!(
             parse_wm_class(b"World\0Good\0Day"),
             Some("World".to_string())
@@ -259,9 +296,7 @@ mod tests {
     #[test]
     fn reports_the_class_field_not_the_instance() {
         // xterm's real WM_CLASS: instance "xterm", class "XTerm".
-        let wm_class = WmClass::from_reply(wm_class_reply(b"xterm\0XTerm\0"))
-            .expect("well-formed WM_CLASS reply should parse")
-            .expect("STRING-typed reply should yield a WmClass");
+        let wm_class = wm_class_from(b"xterm\0XTerm\0");
 
         assert_eq!(
             parse_wm_class(wm_class.class()),
@@ -275,27 +310,46 @@ mod tests {
     }
 
     #[test]
+    fn class_from_wm_class_prefers_class_over_instance() {
+        // The precedence itself, not just the halves it picks between:
+        // swapping the two branches in class_from_wm_class turns xterm's real
+        // WM_CLASS into Some("xterm") and fails here. The Sway backend has the
+        // matching test, and the two orders have to stay in step.
+        assert_eq!(
+            class_from_wm_class(&wm_class_from(b"xterm\0XTerm\0")),
+            Some(("XTerm".to_string(), ClassField::Class))
+        );
+    }
+
+    #[test]
     fn falls_back_to_the_instance_when_the_class_half_is_absent() {
         // A window that set only one field: x11rb reports an empty class, so
         // the instance is all we have.
-        let wm_class = WmClass::from_reply(wm_class_reply(b"Hello World"))
-            .expect("well-formed WM_CLASS reply should parse")
-            .expect("STRING-typed reply should yield a WmClass");
+        let wm_class = wm_class_from(b"Hello World");
 
         assert_eq!(parse_wm_class(wm_class.class()), None);
         assert_eq!(
             parse_wm_class(wm_class.instance()),
             Some("Hello World".to_string())
         );
+
+        // The same shape with the separator NUL present, this time through the
+        // precedence helper rather than a single half.
+        assert_eq!(
+            class_from_wm_class(&wm_class_from(b"xterm\0")),
+            Some(("xterm".to_string(), ClassField::Instance))
+        );
     }
 
     #[test]
     fn an_empty_wm_class_property_yields_nothing() {
-        let wm_class = WmClass::from_reply(wm_class_reply(b""))
-            .expect("empty WM_CLASS reply should parse")
-            .expect("STRING-typed reply should yield a WmClass");
+        let wm_class = wm_class_from(b"");
 
         assert_eq!(parse_wm_class(wm_class.class()), None);
         assert_eq!(parse_wm_class(wm_class.instance()), None);
+
+        // Both halves empty, with and without the separating NUL.
+        assert_eq!(class_from_wm_class(&wm_class), None);
+        assert_eq!(class_from_wm_class(&wm_class_from(b"\0")), None);
     }
 }
