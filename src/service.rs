@@ -89,7 +89,7 @@ impl ServiceManager {
                 if run_ok("systemctl", &["--user", "is-enabled", SYSTEMD_UNIT]) {
                     return true;
                 }
-                match capture("systemctl", &["--user", "list-unit-files", SYSTEMD_UNIT]) {
+                match capture_ok("systemctl", &["--user", "list-unit-files", SYSTEMD_UNIT]) {
                     Some(out) => out.contains(SYSTEMD_UNIT),
                     None => false,
                 }
@@ -205,6 +205,19 @@ fn run_ok(program: &str, args: &[&str]) -> bool {
 fn capture(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program).args(args).output().ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// [`capture`], but `None` unless the command also exited successfully.
+///
+/// Used where stdout alone is not evidence: `systemctl list-unit-files` still
+/// prints a header when it finds nothing, so a substring match on failed output
+/// could report a unit that does not exist.
+fn capture_ok(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

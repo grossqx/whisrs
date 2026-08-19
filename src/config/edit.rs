@@ -15,7 +15,7 @@ use dialoguer::{Confirm, Editor, Input, Select};
 
 use crate::config::setup;
 use crate::service::ServiceManager;
-use crate::{Config, RestartOutcome};
+use crate::{Config, HotkeyConfig, RestartOutcome};
 
 use setup::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
 
@@ -52,9 +52,13 @@ pub fn run_config_menu() -> Result<()> {
             "Vocabulary & prompt",
             "Audio device",
             "Keyboard injection (key delay)",
+            "Clipboard fallback (copy transcript to clipboard)",
+            "Clipboard-only mode (no injection)",
             "Hotkeys",
             "Tray & overlay",
+            "Recording hooks",
             "Command mode (LLM)",
+            "Custom LLM commands",
             "Show full config (masked)",
             "Open in $EDITOR",
             "─────────",
@@ -77,29 +81,33 @@ pub fn run_config_menu() -> Result<()> {
             4 => edit_vocabulary_and_prompt(&mut config)?,
             5 => edit_audio_device(&mut config)?,
             6 => edit_key_delay(&mut config)?,
-            7 => edit_hotkeys(&mut config)?,
-            8 => edit_tray_overlay(&mut config)?,
-            9 => edit_llm(&mut config)?,
-            10 => show_config(&config),
-            11 => {
+            7 => edit_clipboard_fallback(&mut config)?,
+            8 => edit_clipboard_only(&mut config)?,
+            9 => edit_hotkeys(&mut config)?,
+            10 => edit_tray_overlay(&mut config)?,
+            11 => edit_media_hooks(&mut config)?,
+            12 => edit_llm(&mut config)?,
+            13 => edit_llm_commands(&mut config)?,
+            14 => show_config(&config),
+            15 => {
                 if open_in_editor(&mut config)? {
                     // External edit already wrote the file; reload and skip the
                     // normal save path so we don't clobber formatting/comments
-                    // the user might have added.
+                    // (see open_in_editor).
                     println!("  {GREEN}Applied edits from $EDITOR.{RESET}");
                 }
             }
-            12 => {
+            16 => {
                 // separator — no-op
             }
-            13 => {
+            17 => {
                 if save_and_restart(&config, fresh)? {
                     return Ok(());
                 }
                 // Validation failed — fall through to next loop iteration,
                 // preserving the in-memory `config` so the user can fix it.
             }
-            14 => {
+            18 => {
                 println!("\n  {DIM}Discarded changes.{RESET}");
                 return Ok(());
             }
@@ -125,7 +133,9 @@ fn default_config() -> Config {
         llm: None,
         tts: None,
         hotkeys: None,
+        hooks: None,
         overlay: None,
+        llm_commands: Vec::new(),
     }
 }
 
@@ -394,6 +404,38 @@ fn edit_key_delay(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+fn edit_clipboard_fallback(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard fallback{RESET}");
+    println!(
+        "  {DIM}Keep the final transcript in the system clipboard as a fallback, \\\
+         alongside injecting it at the cursor. Use this if injection fails \\\
+         silently or produces garbled text — paste and fix manually.{RESET}"
+    );
+
+    config.input.clipboard_fallback = Confirm::new()
+        .with_prompt("Keep the transcript in the clipboard after dictation?")
+        .default(config.input.clipboard_fallback)
+        .interact()
+        .unwrap_or(config.input.clipboard_fallback);
+    Ok(())
+}
+
+fn edit_clipboard_only(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Clipboard-only mode{RESET}");
+    println!(
+        "  {DIM}Copy the transcript to the clipboard without injecting it at \
+         the cursor — no keystrokes, no paste. Overrides paste and \
+         clipboard fallback.{RESET}"
+    );
+
+    config.input.clipboard_only = Confirm::new()
+        .with_prompt("Copy only to the clipboard (no injection)?")
+        .default(config.input.clipboard_only)
+        .interact()
+        .unwrap_or(config.input.clipboard_only);
+    Ok(())
+}
+
 fn edit_hotkeys(config: &mut Config) -> Result<()> {
     println!("\n  {BOLD}Hotkeys{RESET}");
     println!(
@@ -402,21 +444,48 @@ fn edit_hotkeys(config: &mut Config) -> Result<()> {
          `whisrs toggle` instead.{RESET}"
     );
 
+    // Prompt for every field, in struct order. A field left out of this list
+    // is silently destroyed: the editor rewrites the whole `[hotkeys]` table
+    // from this struct, and `any_hotkey_set` below drops the table entirely
+    // when the prompted fields all come back blank — taking the unprompted
+    // ones with it. That was live data loss for `speak`: editing hotkeys and
+    // clearing toggle/cancel/command deleted a configured read-aloud binding
+    // the editor never showed.
     let mut hotkeys = config.hotkeys.clone().unwrap_or_default();
     hotkeys.toggle = prompt_optional_string("Toggle hotkey", &hotkeys.toggle)?;
     hotkeys.cancel = prompt_optional_string("Cancel hotkey", &hotkeys.cancel)?;
     hotkeys.command = prompt_optional_string("Command-mode hotkey", &hotkeys.command)?;
+    hotkeys.speak = prompt_optional_string("Read-aloud hotkey", &hotkeys.speak)?;
 
     // Drop the whole section if every field is empty — keeps the TOML clean.
-    let any_set = hotkeys.toggle.is_some() || hotkeys.cancel.is_some() || hotkeys.command.is_some();
-    config.hotkeys = if any_set { Some(hotkeys) } else { None };
+    config.hotkeys = if any_hotkey_set(&hotkeys) {
+        Some(hotkeys)
+    } else {
+        None
+    };
     Ok(())
+}
+
+/// Whether any hotkey in the section is bound.
+///
+/// Must consider every field of [`HotkeyConfig`]: a field missed here reads as
+/// "the section is empty" and deletes the user's other bindings along with it.
+fn any_hotkey_set(hotkeys: &HotkeyConfig) -> bool {
+    let HotkeyConfig {
+        toggle,
+        cancel,
+        command,
+        speak,
+    } = hotkeys;
+    toggle.is_some() || cancel.is_some() || command.is_some() || speak.is_some()
 }
 
 fn prompt_optional_string(label: &str, current: &Option<String>) -> Result<Option<String>> {
     let default = current.clone().unwrap_or_default();
     let input: String = Input::new()
-        .with_prompt(format!("{label} (leave blank to unset)"))
+        // Enter keeps the shown default, so an existing value cannot be cleared
+        // by submitting an empty line. Type a space to unset one.
+        .with_prompt(format!("{label} (space to unset)"))
         .default(default)
         .allow_empty(true)
         .interact_text()
@@ -426,6 +495,34 @@ fn prompt_optional_string(label: &str, current: &Option<String>) -> Result<Optio
     } else {
         Some(input)
     })
+}
+
+fn edit_media_hooks(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Recording hooks{RESET}");
+    println!(
+        "  {DIM}Pause MPRIS media that is playing (browsers, Spotify, VLC, MPV,\n   \
+         KDE Connect) while dictating, and resume exactly those afterwards.\n   \
+         Media you paused yourself is left alone.{RESET}"
+    );
+
+    let mut hooks = config.hooks.clone().unwrap_or_default();
+
+    hooks.media_auto_pause = Confirm::new()
+        .with_prompt("Pause playing MPRIS media while recording?")
+        .default(hooks.media_auto_pause)
+        .interact()
+        .unwrap_or(hooks.media_auto_pause);
+
+    hooks.on_record_start =
+        prompt_optional_string("Shell command on record start", &hooks.on_record_start)?;
+    hooks.on_record_stop =
+        prompt_optional_string("Shell command on record stop", &hooks.on_record_stop)?;
+
+    // Drop the whole section if nothing is configured — keeps the TOML clean.
+    let any_set =
+        hooks.media_auto_pause || hooks.on_record_start.is_some() || hooks.on_record_stop.is_some();
+    config.hooks = if any_set { Some(hooks) } else { None };
+    Ok(())
 }
 
 fn edit_tray_overlay(config: &mut Config) -> Result<()> {
@@ -493,6 +590,175 @@ fn edit_llm(config: &mut Config) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn edit_llm_commands(config: &mut Config) -> Result<()> {
+    println!("\n  {BOLD}Custom LLM commands{RESET}");
+    println!(
+        "  {DIM}Each entry gets its own hotkey: dictate, the LLM applies a fixed\n   \
+         instruction to what you said, and the result is typed at the cursor —\n   \
+         a toggle-recording flavor of plain dictation, not command mode (no\n   \
+         selection needed). Uses the same [llm] configuration as command mode.{RESET}"
+    );
+
+    loop {
+        if config.llm_commands.is_empty() {
+            println!("  {DIM}(none configured){RESET}");
+        } else {
+            println!();
+            for (i, entry) in config.llm_commands.iter().enumerate() {
+                println!(
+                    "    {}. {BOLD}{}{RESET}  [{}]  {}",
+                    i + 1,
+                    entry.name,
+                    entry.hotkey,
+                    truncate_for_menu(&entry.instruction)
+                );
+            }
+        }
+
+        let mut choices = vec!["Add new".to_string()];
+        if !config.llm_commands.is_empty() {
+            choices.push("Edit an entry".to_string());
+            choices.push("Remove an entry".to_string());
+        }
+        choices.push("Done".to_string());
+        let done_index = choices.len() - 1;
+
+        let selection = Select::new()
+            .with_prompt("Custom LLM commands")
+            .items(&choices)
+            .default(done_index)
+            .interact()
+            .context("failed to read menu selection")?;
+
+        match choices[selection].as_str() {
+            "Add new" => add_llm_command(config)?,
+            "Edit an entry" => edit_one_llm_command(config)?,
+            "Remove an entry" => remove_llm_command(config)?,
+            _ => return Ok(()), // "Done"
+        }
+    }
+}
+
+fn add_llm_command(config: &mut Config) -> Result<()> {
+    let name: String = Input::new()
+        .with_prompt("Name (identifier, e.g. \"translate-de\")")
+        .interact_text()
+        .context("failed to read name")?;
+    if config.llm_commands.iter().any(|e| e.name == name) {
+        println!("  {YELLOW}An entry named '{name}' already exists — edit it instead.{RESET}");
+        return Ok(());
+    }
+    let hotkey: String = Input::new()
+        .with_prompt("Hotkey (e.g. \"Super+Shift+T\")")
+        .interact_text()
+        .context("failed to read hotkey")?;
+    let set_hotkey_raw: String = Input::new()
+        .with_prompt(
+            "Set-hotkey — reprogram this command from selected text (optional, blank to skip)",
+        )
+        .allow_empty(true)
+        .interact_text()
+        .context("failed to read set_hotkey")?;
+    let set_hotkey = Some(set_hotkey_raw.trim().to_string()).filter(|s| !s.is_empty());
+    let instruction: String = Input::new()
+        .with_prompt("Instruction applied to the dictated text")
+        .interact_text()
+        .context("failed to read instruction")?;
+
+    config.llm_commands.push(crate::llm::LlmCommandConfig {
+        name,
+        hotkey,
+        set_hotkey,
+        instruction,
+    });
+    println!("  {GREEN}Added.{RESET}");
+    Ok(())
+}
+
+fn edit_one_llm_command(config: &mut Config) -> Result<()> {
+    let Some(idx) = select_llm_command(config, "Edit which entry?")? else {
+        return Ok(());
+    };
+
+    let entry = config.llm_commands[idx].clone();
+    let name: String = Input::new()
+        .with_prompt("Name")
+        .default(entry.name)
+        .interact_text()
+        .context("failed to read name")?;
+    let hotkey: String = Input::new()
+        .with_prompt("Hotkey")
+        .default(entry.hotkey)
+        .interact_text()
+        .context("failed to read hotkey")?;
+    let set_hotkey_raw: String = Input::new()
+        .with_prompt("Set-hotkey (reprogram from selection; blank for none)")
+        .default(entry.set_hotkey.clone().unwrap_or_default())
+        .allow_empty(true)
+        .interact_text()
+        .context("failed to read set_hotkey")?;
+    let set_hotkey = Some(set_hotkey_raw.trim().to_string()).filter(|s| !s.is_empty());
+    let instruction: String = Input::new()
+        .with_prompt("Instruction")
+        .default(entry.instruction)
+        .interact_text()
+        .context("failed to read instruction")?;
+
+    config.llm_commands[idx] = crate::llm::LlmCommandConfig {
+        name,
+        hotkey,
+        set_hotkey,
+        instruction,
+    };
+    println!("  {GREEN}Updated.{RESET}");
+    Ok(())
+}
+
+fn remove_llm_command(config: &mut Config) -> Result<()> {
+    let Some(idx) = select_llm_command(config, "Remove which entry?")? else {
+        return Ok(());
+    };
+    let removed = config.llm_commands.remove(idx);
+    println!("  {GREEN}Removed '{}'.{RESET}", removed.name);
+    Ok(())
+}
+
+/// Show a picker over current entries plus a trailing "Cancel". Returns
+/// `None` when the user cancels.
+fn select_llm_command(config: &Config, prompt: &str) -> Result<Option<usize>> {
+    let mut items: Vec<String> = config
+        .llm_commands
+        .iter()
+        .map(|e| format!("{} ({})", e.name, e.hotkey))
+        .collect();
+    items.push("Cancel".to_string());
+    let cancel_index = items.len() - 1;
+
+    let selection = Select::new()
+        .with_prompt(prompt)
+        .items(&items)
+        .default(0)
+        .interact()
+        .context("failed to read selection")?;
+
+    Ok(if selection == cancel_index {
+        None
+    } else {
+        Some(selection)
+    })
+}
+
+/// Truncate an instruction string for the summary menu line.
+fn truncate_for_menu(s: &str) -> String {
+    const MAX: usize = 50;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(MAX).collect();
+        format!("{truncated}…")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -652,4 +918,76 @@ fn parse_csv_list(input: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field name of `[hotkeys]`, taken from serde rather than a hand-
+    /// written list so a new field cannot be forgotten here too.
+    fn hotkey_field_names() -> Vec<String> {
+        let all_set = HotkeyConfig {
+            toggle: Some("a".into()),
+            cancel: Some("b".into()),
+            command: Some("c".into()),
+            speak: Some("d".into()),
+        };
+        let json = serde_json::to_value(&all_set).expect("HotkeyConfig serializes");
+        json.as_object()
+            .expect("HotkeyConfig is a struct")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The editor rewrites the whole `[hotkeys]` table from the struct, so a
+    /// field it never prompts for is blanked on save. Assert the prompt list
+    /// covers every field — this is the half of the bug a value test cannot
+    /// see, since the prompting itself is interactive IO.
+    #[test]
+    fn edit_hotkeys_prompts_for_every_field() {
+        let source = include_str!("edit.rs");
+        let body = source
+            .split("fn edit_hotkeys(")
+            .nth(1)
+            .expect("edit.rs defines edit_hotkeys")
+            .split("\nfn ")
+            .next()
+            .expect("edit_hotkeys has a body");
+
+        for field in hotkey_field_names() {
+            assert!(
+                body.contains(&format!("hotkeys.{field} = prompt_optional_string")),
+                "edit_hotkeys never prompts for `{field}`, so editing hotkeys deletes it"
+            );
+        }
+    }
+
+    /// A section with nothing bound is dropped, keeping the TOML clean.
+    #[test]
+    fn an_empty_hotkey_section_is_dropped() {
+        assert!(!any_hotkey_set(&HotkeyConfig::default()));
+    }
+
+    /// Any single binding keeps the section. Before this was widened, a set
+    /// `speak` with the other three blank read as empty and the binding was
+    /// deleted on save.
+    #[test]
+    fn any_single_binding_keeps_the_section() {
+        for field in hotkey_field_names() {
+            let mut hotkeys = HotkeyConfig::default();
+            match field.as_str() {
+                "toggle" => hotkeys.toggle = Some("Super+Shift+D".into()),
+                "cancel" => hotkeys.cancel = Some("Super+Shift+Escape".into()),
+                "command" => hotkeys.command = Some("Super+Shift+C".into()),
+                "speak" => hotkeys.speak = Some("Super+Shift+R".into()),
+                other => panic!("unhandled hotkey field `{other}` — add it to this test"),
+            }
+            assert!(
+                any_hotkey_set(&hotkeys),
+                "a lone `{field}` binding was treated as an empty section and dropped"
+            );
+        }
+    }
 }

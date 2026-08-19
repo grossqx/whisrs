@@ -11,7 +11,7 @@ members = [
 
 [package]
 name = "whisrs"
-version = "0.1.19"
+version = "0.1.26"
 edition = "2021"
 description = "Linux-first voice-to-text dictation tool with Groq, OpenAI, and local Whisper backends"
 license = "MIT"
@@ -33,11 +33,24 @@ path = "src/cli/main.rs"
 name = "whisrsd"
 path = "src/daemon/main.rs"
 
+[[example]]
+name = "issue55_stream_check"
+required-features = ["local-whisper"]
+
 [features]
-default = ["local-whisper", "tray", "overlay"]
+default = ["local-whisper", "tray", "overlay", "hooks"]
 local-whisper = ["dep:whisper-rs"]
 tray = ["dep:ksni"]
-overlay = ["dep:smithay-client-toolkit", "dep:wayland-client", "dep:tiny-skia"]
+overlay = ["dep:smithay-client-toolkit", "dep:wayland-client", "dep:tiny-skia", "dep:zbus"]
+hooks = ["dep:zbus"]
+# GPU backends for the bundled whisper.cpp. Opt-in at build time — the backend
+# has to be linked in, so there is no runtime switch — and CPU stays the default.
+# The `whisper-rs?/…` weak syntax applies the feature to whisper-rs without
+# itself enabling the optional dependency; `local-whisper` is what pulls it in,
+# so builds that never enable it stay free of whisper-rs.
+vulkan = ["local-whisper", "whisper-rs?/vulkan"]
+cuda = ["local-whisper", "whisper-rs?/cuda"]
+hipblas = ["local-whisper", "whisper-rs?/hipblas"]
 
 [dependencies]
 anyhow = "1"
@@ -45,7 +58,7 @@ asr-dedup = { path = "crates/asr-dedup", version = "0.1" }
 audio-silence-gate = { path = "crates/audio-silence-gate", version = "0.1" }
 filler-remove = { path = "crates/filler-remove", version = "0.1" }
 prompt-echo = { path = "crates/prompt-echo", version = "0.1" }
-xkb-type = { path = "crates/xkb-type", version = "0.1.2", features = ["arboard", "wayland-vk"] }
+xkb-type = { path = "crates/xkb-type", version = "0.1.4", features = ["arboard", "wayland-vk"] }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
@@ -67,10 +80,13 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 toml = "0.8"
+# Format-preserving config rewrites (issue #82). Kept on 0.22 so it shares the
+# exact toml_edit build that `toml 0.8` already pulls in — no new dependency tree.
+toml_edit = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x11rb = { version = "0.13", features = ["randr", "shape"] }
-zbus = "5"
+zbus = { version = "5", optional = true }
 
 [dependencies.ksni]
 version = "0.3"
@@ -96,3 +112,5 @@ optional = true
 
 [dev-dependencies]
 tempfile = "3"
+# start_paused tests need tokio's paused clock ("test-util" is not in "full").
+tokio = { version = "1", features = ["test-util"] }

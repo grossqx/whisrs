@@ -1,4 +1,4 @@
-.TH WHISRS 1 "2026-03-14" "whisrs 0.1.0" "User Commands"
+.TH WHISRS 1 "2026-08-18" "whisrs 0.1.26" "User Commands"
 .SH NAME
 whisrs \- Linux-first voice-to-text dictation CLI
 .SH SYNOPSIS
@@ -34,10 +34,71 @@ this does not touch udev rules, the systemd unit, or compositor keybindings.
 Start or stop recording. If idle, begins audio capture. If recording,
 stops capture and sends audio for transcription. Text is typed at the
 cursor in the previously focused window.
+.RS
+.TP
+\fB\-l\fR, \fB\-\-language\fR \fICODE\fR
+Override the transcription language for this session only \(em no config
+edit or daemon restart.
+.I CODE
+is an ISO 639\-1 code (e.g.
+.BR en ,
+.BR pl ),
+optionally with a region (e.g.
+.BR en\-US ),
+or
+.B auto
+for automatic detection. Applies to the
+.B toggle
+that starts recording; the override ends with the session. A plain
+.B toggle
+keeps using the configured
+.IR general.language ,
+so an existing hotkey is unaffected. Bind a separate key per language to
+dictate in each without switching settings.
+.RE
 .TP
 .B cancel
 Cancel the current recording and discard captured audio. Returns the
 daemon to the idle state. Has no effect if the daemon is not recording.
+.TP
+.B log
+Show recent transcription history.
+.RS
+.TP
+\fB\-n\fR, \fB\-\-limit\fR \fIN\fR
+Number of entries to show. Defaults to
+.BR 20 .
+.TP
+\fB\-\-clear\fR
+Clear all history instead of showing it.
+.RE
+.TP
+.B command
+Command mode: select text, speak an instruction, and the LLM rewrites it
+in place. Requires a selection. To write text where there is none, configure
+an
+.B [[llm_commands]]
+entry with a generic \(lqtreat the following text as a request and output
+only what is asked\(rq instruction \(em that path never reads the selection.
+See
+.I https://github.com/y0sif/whisrs/blob/main/docs/configuration.md
+for the recipe.
+.TP
+\fBllm\-command\fR \fINAME\fR
+Toggle a named custom LLM command (see
+.B [[llm_commands]]
+in
+.IR config.toml ):
+dictate, the LLM applies the configured instruction, and the result is
+typed at the cursor. Press again to stop recording, same as
+.BR toggle .
+.TP
+\fBllm\-command\-set\fR \fINAME\fR
+Reprogram a named LLM command from the current selection: highlight the
+new instruction text, then run this \(em it is saved to
+.I config.toml
+and applied live. Pairs with an entry's
+.BR set_hotkey .
 .TP
 .B speak
 Read the current text selection aloud via text-to-speech. A second
@@ -66,6 +127,37 @@ otherwise prints guidance for manual restart. Does not require the daemon
 to be running \(em
 .B restart
 will start a stopped service.
+.SH LLM OUTPUT
+Applies to
+.B command
+and to every
+.B [[llm_commands]]
+entry \(em both type the model's reply at the cursor.
+.PP
+A reply wrapped entirely in a Markdown code fence is unwrapped before it is
+typed; a fence is never what you wanted at the cursor. A reply that contains
+several fenced blocks is prose about code, not a wrapper, and is left alone.
+Stripping has no opt-out, so an entry whose instruction asks for a fenced
+block cannot produce one.
+.PP
+A reply spanning several lines is typed normally \(em translating a paragraph
+or drafting an email is exactly what these commands are for. The one exception
+is a terminal: there a line break is an Enter that runs a command you have not
+read, so a multi-line reply aimed at a terminal is refused rather than typed.
+It is not lost \(em it is written to the history, where
+.B whisrs log
+recovers it. Ask for a one\-liner to get an injected result. The refusal also
+applies with
+.B [input] paste
+set, since bracketed paste is the foreground program's choice and cannot be
+relied on; and its notification fires even with
+.B [general] notify
+turned off, because nothing was typed.
+.PP
+Terminal detection needs
+.BR WindowTracker::get_focused_window_class ,
+which only Hyprland and Niri implement; elsewhere a terminal is treated as an
+ordinary target and multi-line replies are typed.
 .SH ENVIRONMENT
 .TP
 .B WHISRS_GROQ_API_KEY
@@ -92,7 +184,7 @@ Defaults to
 .I ~/.config/whisrs/config.toml
 Main configuration file. Created by
 .BR "whisrs setup" .
-Contains backend selection, API keys, language, and audio settings.
+Contains backend selection, API keys, language, audio settings, and hooks.
 Permissions should be 0600 since it may contain API keys.
 .TP
 .I $XDG_RUNTIME_DIR/whisrs.sock
@@ -118,6 +210,12 @@ Start dictation (bind this to a hotkey):
 .PP
 .RS
 .B whisrs toggle
+.RE
+.PP
+Start dictation in Polish for this session only:
+.PP
+.RS
+.B whisrs toggle \-l pl
 .RE
 .PP
 Cancel recording:

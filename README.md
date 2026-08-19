@@ -41,6 +41,59 @@ To **build from source** instead — including custom feature flag combos or uns
 
 After install, **press your hotkey** to start recording, **press again** to stop. Text appears at your cursor.
 
+### GPU acceleration (local whisper.cpp)
+
+The default build — and every prebuilt tarball that ships whisper.cpp at all — runs it on the CPU. If you use the `local-whisper` backend, building with a GPU feature moves the model onto your GPU and cuts dictation latency from seconds to near-instant:
+
+```bash
+cargo install whisrs --features vulkan
+```
+
+| Feature | Backend | Hardware |
+|---|---|---|
+| `vulkan` | Vulkan | AMD, Intel, NVIDIA (cross-vendor; the safe default) |
+| `cuda` | CUDA | NVIDIA, needs the CUDA toolkit |
+| `hipblas` | ROCm/HIP | AMD, needs ROCm |
+
+These are compile-time features — the GPU backend has to be linked in, so there is no runtime switch. Each one implies `local-whisper`; the cloud backends are unaffected, and CPU stays the default.
+
+**Build-time system dependencies** (on top of the usual `alsa-lib`, `libxkbcommon`, `clang`, `cmake`). For `vulkan`:
+
+```bash
+# Arch Linux
+sudo pacman -S vulkan-headers vulkan-icd-loader shaderc
+
+# Debian/Ubuntu
+sudo apt install libvulkan-dev glslc
+
+# Fedora
+sudo dnf install vulkan-headers vulkan-loader-devel glslc
+```
+
+Your GPU driver package alone is **not** enough. The driver ships the runtime, not the development headers or the shader compiler, so a machine that runs Vulkan games fine will still fail the build with:
+
+```
+Could NOT find Vulkan (missing: Vulkan_INCLUDE_DIR)
+```
+
+Install the packages above and rebuild. `cuda` and `hipblas` likewise need their full toolkits (`cuda` / `rocm-hip-sdk`), not just the driver.
+
+**Verify it worked.** The binary should link against the Vulkan loader:
+
+```bash
+ldd ~/.cargo/bin/whisrsd | grep vulkan
+```
+
+No output means you got a CPU build. Then start the daemon in the foreground and watch whisper.cpp report the device it picked up:
+
+```bash
+RUST_LOG=debug whisrsd
+```
+
+A working Vulkan build names your GPU at load time (for example `ggml_vulkan: Found 1 Vulkan devices: Radeon RX 9070 XT (RADV GFX1201)`) and loads the model onto it.
+
+> **If you installed whisrs from a distro package or the tarball**, `cargo install` writes the new binaries to `~/.cargo/bin` and leaves the old ones in `/usr/local/bin` or `/usr/bin` untouched. Check that your systemd unit still points at the binary you just built — `systemctl --user show whisrs.service -p ExecStart` — and point `ExecStart` at `~/.cargo/bin/whisrsd` if it doesn't, otherwise you'll keep running the CPU build without noticing. Don't just delete the old binary: `whisrs setup` writes an absolute `ExecStart`, so removing what it points at stops the daemon starting rather than moving it to the new build.
+
 <details>
 <summary><b>Other install methods (pre-built binary, AUR, Cargo, Nix, manual)</b></summary>
 
@@ -61,6 +114,8 @@ curl -sSL -o whisrs.tar.gz https://github.com/y0sif/whisrs/releases/latest/downl
 tar xzf whisrs.tar.gz
 sudo install -m755 whisrs whisrsd /usr/local/bin/
 sudo install -m644 contrib/99-whisrs.rules /etc/udev/rules.d/
+# On NixOS/Guix, point the rule's ACL fallback at your setfacl:
+# command -v setfacl >/dev/null && sudo sed -i "s|/usr/bin/setfacl|$(command -v setfacl)|g" /etc/udev/rules.d/99-whisrs.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input $USER   # log out / back in for the group change
 whisrs setup
@@ -181,10 +236,12 @@ bindsym $mod+w exec whisrs toggle
 | **OpenAI Realtime** | Cloud (WebSocket) | True streaming | Paid | Best UX, text as you speak |
 | **OpenAI REST** | Cloud | Batch | Paid | Simple fallback |
 | **OpenAI-compatible Realtime** | External WebSocket | Completed-utterance realtime | Free / self-hosted | Lemonade and similar OpenAI-style ASR servers |
-| **Local whisper.cpp** | Local (CPU/GPU) | Sliding window | Free | Privacy, offline use |
+| **Local whisper.cpp** | Local (CPU/GPU) | Silence-split phrases | Free | Privacy, offline use |
 | **ASR sidecar** | Local sidecar | Batch | Free | Bring-your-own local ASR (Moonshine, Parakeet, VibeVoice-ASR, …) |
 
 Groq is the default. For fully offline use, run `whisrs setup` and select **Local > whisper.cpp** — `base.en` (142 MB, ~388 MB RAM) is recommended; `tiny.en` (75 MB) for low-end hardware, `small.en` (466 MB) for higher accuracy.
+
+Local whisper.cpp streams by splitting dictation into phrases at natural pauses and decoding each phrase exactly once (the `[local-whisper]` defaults `segmentation = "silence"`, `phrase_silence_ms = 400`); set `segmentation = "window"` for the legacy overlapping sliding window. See [docs/configuration.md](docs/configuration.md).
 
 For local ASR models without a Rust runtime (Moonshine, NVIDIA Parakeet, Microsoft VibeVoice-ASR), use the generic ASR sidecar backend — it talks to a small local HTTP service that hosts the model. See [`contrib/asr-sidecars/`](contrib/asr-sidecars/) for ready-to-run sidecars.
 
@@ -208,7 +265,7 @@ api_key = "gsk_..."
 
 Env-var overrides: `WHISRS_GROQ_API_KEY`, `WHISRS_DEEPGRAM_API_KEY`, `WHISRS_OPENAI_API_KEY`.
 
-For the full reference (overlay, `[input]`, `[openai-compatible-realtime]`, `[asr-sidecar]`, `[llm]`, `[hotkeys]`, GNOME extension setup), see [docs/configuration.md](docs/configuration.md).
+For the full reference (overlay, `[input]`, `[openai-compatible-realtime]`, `[asr-sidecar]`, `[llm]`, `[hotkeys]`, `[hooks]`, GNOME extension setup), see [docs/configuration.md](docs/configuration.md).
 
 ---
 
@@ -217,16 +274,72 @@ For the full reference (overlay, `[input]`, `[openai-compatible-realtime]`, `[as
 ```
 whisrs setup     # Interactive onboarding
 whisrs config    # Interactive editor for ~/.config/whisrs/config.toml
-whisrs toggle    # Start/stop recording
+whisrs toggle    # Start/stop recording (uses general.language)
+whisrs toggle -l en  # Start/stop recording, overriding the language for this session
 whisrs cancel    # Cancel recording, discard audio
 whisrs status    # Query daemon state
 whisrs restart   # Restart the daemon (uses the systemd or OpenRC user service when present)
 whisrs command   # Command mode: select text + speak instruction → LLM rewrite
+whisrs llm-command <name>      # Toggle a named [[llm_commands]] entry (see config.toml)
+whisrs llm-command-set <name>  # Reprogram a named LLM command from the current selection
 whisrs speak     # Read the selected text aloud (alias: whisrs read; press again to stop)
 whisrs log       # Show recent transcription history
 whisrs log -n 5  # Show last 5 entries
 whisrs log --clear  # Clear all history
 ```
+
+### Per-language keys
+
+`toggle` accepts an optional `--language`/`-l <CODE>` (ISO 639-1, or `auto`) that
+overrides `general.language` for that one session only -- no config edit or daemon
+restart. Bind a separate key per language so you can dictate in each without
+switching settings. Hyprland:
+```
+bind = , F1, exec, whisrs toggle -l en
+bind = , F2, exec, whisrs toggle -l pl
+```
+Sway:
+```
+bindsym F1 exec whisrs toggle -l en
+bindsym F2 exec whisrs toggle -l pl
+```
+Without `-l`, `whisrs toggle` keeps using `general.language`, so an existing
+plain-toggle key is unaffected.
+
+### LLM post-processing
+
+Three ways to put an LLM between your voice and the cursor, all sharing the one
+`[llm]` section:
+
+- `whisrs command`: select text, speak an instruction, the selection is rewritten in place.
+- `[[llm_commands]]`: a named instruction on its own hotkey. Dictate, the LLM applies it, the result is typed. One hotkey per entry.
+- `[general] llm_post_process`: the same rewrite on the normal toggle key, with no extra binding.
+
+```toml
+[general]
+backend = "groq"           # a batch backend
+llm_post_process = true    # off by default
+llm_instruction = "Fix punctuation and obvious transcription errors. Keep the wording unchanged. Return only the corrected text."
+```
+
+With it on, every `whisrs toggle` dictation goes through `[llm]` before it is
+typed.
+
+**Batch backends only:** `deepgram`, `groq`, `openai`, `asr-sidecar`. The
+streaming backends, which are `deepgram-streaming`, `openai-realtime`,
+`openai-compatible-realtime` **and `local-whisper`**, type text at the cursor as
+it arrives, so no whole transcript ever exists to post-process and the flag does
+nothing at all. `local-whisper` is the one to watch: it runs offline and
+transcribes in a single call, but dictation with it always streams, so
+`llm_post_process` is a silent no-op there too. `whisrsd` warns at startup if you
+pair the two. Use an `[[llm_commands]]` hotkey instead, which works whatever the
+backend.
+
+If the LLM call fails, times out, or returns nothing, the raw transcript is typed
+instead, so a dictation is never lost to post-processing. A post-processed entry
+shows up in `whisrs log` tagged `<backend>+llm` (for example `groq+llm`); a
+dictation that fell back to the raw transcript keeps the plain backend name. See
+[docs/configuration.md](docs/configuration.md).
 
 ---
 
@@ -249,7 +362,7 @@ whisrs log --clear  # Clear all history
 
 ## Project Status
 
-whisrs is functional and usable for daily dictation. Streaming transcription, command mode, read-selection-aloud (TTS via Groq, OpenAI, Deepgram, or a local sidecar), multi-language support, system tray, OSD overlay, layout-aware injection (incl. AltGr + dead keys), the generic ASR sidecar backend (Moonshine, Parakeet, VibeVoice-ASR), and packaging for AUR / Nix / crates.io all ship today. Native local Vosk and Parakeet backends are next.
+whisrs is functional and usable for daily dictation. Streaming transcription, command mode, read-selection-aloud (TTS via Groq, OpenAI, Deepgram, or a local sidecar), multi-language support, system tray (status, restart and quit in the menu; left-click toggles recording where the tray host forwards it, as waybar and Plasma do), OSD overlay, layout-aware injection (incl. AltGr + dead keys), the generic ASR sidecar backend (Moonshine, Parakeet, VibeVoice-ASR), and packaging for AUR / Nix / crates.io all ship today. Native local Vosk and Parakeet backends are next.
 
 Per-release details: [docs/version-roadmap.md](docs/version-roadmap.md).
 
