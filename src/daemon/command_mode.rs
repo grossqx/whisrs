@@ -394,8 +394,9 @@ async fn command_mode_background_inner(
     // `WindowTracker::get_focused_window_class()` is implemented, which is
     // Hyprland, Niri, Sway and X11. It still returns `None` on KWin and GNOME
     // (`src/window/dbus.rs`: GNOME needs a shell extension, issue #72; KWin
-    // would need the `org_kde_plasma_window_management` Wayland protocol), so
-    // there it stays false and terminals fall back to plain injection at the
+    // would need the `org_kde_plasma_window_management` Wayland protocol,
+    // issue #127), so it stays false and terminals fall back to plain
+    // injection at the
     // cursor (and to plain Ctrl+V on the paste branch). The practical
     // consequence for the gate is that on those two desktops a multi-line reply
     // is typed into a terminal rather than refused, the same exposure the
@@ -890,8 +891,9 @@ async fn llm_command_background_inner(
     // Resolved unconditionally, not just on the paste branch: the multi-line
     // gate needs it too. Same caveat as command mode: `get_focused_window_class()`
     // returns `None` on GNOME (needs a shell extension, issue #72) and on KWin
-    // (would need the `org_kde_plasma_window_management` Wayland protocol), so
-    // this stays false there and a terminal is treated as an ordinary target.
+    // (would need the `org_kde_plasma_window_management` Wayland protocol,
+    // issue #127), so this stays false there and a terminal is treated as an
+    // ordinary target.
     let is_terminal = context
         .window_tracker
         .get_focused_window_class()

@@ -161,8 +161,8 @@ clipboard_only = false
 #
 # A class is reported on Hyprland, Niri, Sway and X11. GNOME reports none
 # without a shell extension (issue #72), and KDE reports none because whisrs
-# does not speak the org_kde_plasma_window_management Wayland protocol, so this
-# key has no effect on either.
+# does not speak the org_kde_plasma_window_management Wayland protocol (issue
+# #127), so this key has no effect on either.
 #
 # Sway and X11 started reporting a class in issue #71, so terminal detection
 # now fires on those sessions. Four behaviors change there:

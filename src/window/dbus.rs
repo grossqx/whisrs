@@ -3,7 +3,8 @@
 //! Neither desktop exposes focus tracking to an unprivileged daemon out of the
 //! box: GNOME needs a shell extension (issue #72), and KDE would need the
 //! `org_kde_plasma_window_management` Wayland protocol, which whisrs does not
-//! speak. This module provides a stub that returns clear error messages.
+//! speak (issue #127). This module provides a stub that returns clear error
+//! messages.
 
 use tracing::{debug, warn};
 
@@ -42,8 +43,8 @@ impl WindowTracker for DbusTracker {
     }
 
     /// Always `None`: GNOME needs a shell extension (issue #72) and KDE would
-    /// need the `org_kde_plasma_window_management` Wayland protocol, so neither
-    /// can report the focused window class here yet.
+    /// need the `org_kde_plasma_window_management` Wayland protocol (issue
+    /// #127), so neither can report the focused window class here yet.
     ///
     /// Logged at `debug!` rather than the `warn!` the other two methods use:
     /// this is queried on every injection, and the other backends log their
