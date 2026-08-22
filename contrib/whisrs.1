@@ -156,8 +156,9 @@ turned off, because nothing was typed.
 .PP
 Terminal detection needs
 .BR WindowTracker::get_focused_window_class ,
-which only Hyprland and Niri implement; elsewhere a terminal is treated as an
-ordinary target and multi-line replies are typed.
+which Hyprland, Niri, Sway and X11 implement. On GNOME and KDE it reports
+nothing, so a terminal there is treated as an ordinary target and multi-line
+replies are typed.
 .SH ENVIRONMENT
 .TP
 .B WHISRS_GROQ_API_KEY
