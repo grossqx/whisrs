@@ -401,7 +401,11 @@ pub struct InputConfig {
     /// a generic name like `warp` matches a window whose class is exactly
     /// `warp`, and leaves `app.drey.Warp` (GNOME's Magic Wormhole client)
     /// alone. Write the class exactly as the compositor reports it
-    /// (`hyprctl activewindow`, `niri msg focused-window`).
+    /// (`hyprctl activewindow`, `niri msg focused-window`, `swaymsg -t
+    /// get_tree`, `xprop WM_CLASS`). Sway reports `app_id` for Wayland views
+    /// and `window_properties.class` for XWayland ones, falling back to
+    /// `window_properties.instance`; on X11 the class is the second of the two
+    /// strings in `WM_CLASS`, falling back to the first.
     #[serde(default)]
     pub terminal_classes: Vec<String>,
 }
