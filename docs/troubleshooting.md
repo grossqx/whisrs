@@ -53,14 +53,42 @@ Restart the daemon for the change to take effect.
 
 ## Daemon not running
 
-Start the daemon manually (`whisrsd`) or via systemd:
+Start the daemon manually (`whisrsd`) or via your service manager.
+
+systemd:
 
 ```bash
 systemctl --user start whisrs.service
 systemctl --user status whisrs.service
 ```
 
-If it fails, check logs with `journalctl --user -u whisrs.service` or run `RUST_LOG=debug whisrsd` in the foreground.
+OpenRC:
+
+```bash
+rc-service --user whisrs start
+rc-service --user whisrs status
+```
+
+If it fails, check the logs — `journalctl --user -u whisrs.service` under systemd,
+`$XDG_STATE_HOME/whisrs/whisrsd.log` (default `~/.local/state/whisrs/whisrsd.log`)
+under OpenRC — or run `RUST_LOG=debug whisrsd` in the foreground.
+
+## No window tracking or clipboard paste under OpenRC
+
+OpenRC runs services with a scrubbed environment and, unlike systemd, has no
+user-environment store to import from. If `whisrsd` starts without
+`WAYLAND_DISPLAY`, `HYPRLAND_INSTANCE_SIGNATURE` and `DBUS_SESSION_BUS_ADDRESS`,
+window tracking, clipboard paste and the tray all fail.
+
+`contrib/openrc/whisrs.initd` recovers these before starting the daemon. If you
+wrote your own init script, either copy that logic or set `whisrsd_env_file` in
+`~/.config/rc/conf.d/whisrs` to a file of `KEY='value'` lines.
+
+Confirm what the daemon actually received:
+
+```bash
+tr '\0' '\n' < /proc/$(pgrep -x whisrsd)/environ | grep -E 'WAYLAND|DISPLAY|DBUS'
+```
 
 ## Model download fails (local whisper)
 

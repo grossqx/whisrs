@@ -6,7 +6,7 @@ use tokio::net::UnixStream;
 
 use whisrs::history::HistoryEntry;
 use whisrs::{
-    encode_message, read_message, restart_daemon_via_systemd, socket_path, Command, Response,
+    encode_message, read_message, service::ServiceManager, socket_path, Command, Response,
     RestartOutcome, State,
 };
 
@@ -89,7 +89,7 @@ enum SubCmd {
     /// Read the selected text aloud via TTS (press again to stop playback)
     #[command(alias = "read")]
     Speak,
-    /// Restart the whisrs daemon (uses the systemd user service when present)
+    /// Restart the whisrs daemon (uses the systemd or OpenRC user service when present)
     Restart,
 }
 
@@ -177,20 +177,22 @@ async fn main() -> anyhow::Result<()> {
 
 /// Restart the whisrs daemon.
 ///
-/// Uses the systemd user service when `whisrs.service` is loaded; otherwise
-/// prints guidance for non-systemd setups. We don't try to `pkill whisrsd`
-/// ourselves because that races with respawn and silently breaks for users
-/// who launched the daemon under tmux/foot/etc.
+/// Delegates to whichever init system is managing the daemon (systemd or
+/// OpenRC), and prints guidance when neither has a whisrs service installed.
+/// We don't try to `pkill whisrsd` ourselves because that races with respawn
+/// and silently breaks for users who launched the daemon under tmux/foot/etc.
 fn cmd_restart() -> anyhow::Result<()> {
     let use_color = is_tty();
+    let manager = ServiceManager::detect();
 
+    let banner = format!("Restarting whisrs daemon ({})…", manager.name());
     if use_color {
-        println!("{BOLD}Restarting whisrs daemon (systemd)…{RESET}");
+        println!("{BOLD}{banner}{RESET}");
     } else {
-        println!("Restarting whisrs daemon (systemd)…");
+        println!("{banner}");
     }
 
-    match restart_daemon_via_systemd() {
+    match manager.restart() {
         RestartOutcome::Restarted => {
             if use_color {
                 println!("{GREEN}Daemon restarted.{RESET}");
@@ -200,32 +202,39 @@ fn cmd_restart() -> anyhow::Result<()> {
             Ok(())
         }
         RestartOutcome::Failed => {
+            let hint = manager.restart_hint().unwrap_or("restart");
             if use_color {
-                eprintln!("{RED}systemctl --user restart whisrs.service failed.{RESET}");
+                eprintln!("{RED}{hint} failed.{RESET}");
             } else {
-                eprintln!("systemctl --user restart whisrs.service failed.");
+                eprintln!("{hint} failed.");
             }
             process::exit(1);
         }
-        RestartOutcome::NoSystemdUnit => {
+        RestartOutcome::NoService => {
+            let detail = match manager.enable_hint() {
+                Some(enable) => format!(
+                    "No whisrs service installed for {}.\n\
+                     \n\
+                     Install it (run `whisrs setup` and accept the service step), then:\n\
+                     \n\
+                     \x20 {enable}\n\
+                     \n\
+                     Or restart the daemon manually:\n\
+                     \n\
+                     \x20 pkill whisrsd; sleep 0.2; whisrsd &",
+                    manager.name()
+                ),
+                None => "No service manager detected (neither systemd nor OpenRC).\n\
+                     \n\
+                     Restart the daemon manually:\n\
+                     \n\
+                     \x20 pkill whisrsd; sleep 0.2; whisrsd &"
+                    .to_string(),
+            };
             if use_color {
-                eprintln!(
-                    "{YELLOW}No whisrs systemd user unit detected.{RESET}\n\
-                     \n\
-                     Install the systemd unit (run `whisrs setup` and accept the systemd step),\n\
-                     or restart the daemon manually:\n\
-                     \n\
-                     \x20 pkill whisrsd; sleep 0.2; whisrsd &"
-                );
+                eprintln!("{YELLOW}{detail}{RESET}");
             } else {
-                eprintln!(
-                    "No whisrs systemd user unit detected.\n\
-                     \n\
-                     Install the systemd unit (run `whisrs setup` and accept the systemd step),\n\
-                     or restart the daemon manually:\n\
-                     \n\
-                     \x20 pkill whisrsd; sleep 0.2; whisrsd &"
-                );
+                eprintln!("{detail}");
             }
             process::exit(1);
         }
@@ -240,26 +249,27 @@ async fn send_command(cmd: Command) -> anyhow::Result<()> {
     let stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
         Err(_) => {
+            // Name the command that actually exists on this machine — telling
+            // an OpenRC user to run systemctl is a dead end.
+            let service_hint = match ServiceManager::detect().enable_hint() {
+                Some(enable) => format!(
+                    "\n\
+                     \n\
+                     Or enable the service:\n\
+                     \n\
+                     \x20 {enable}"
+                ),
+                None => String::new(),
+            };
+            let msg = format!(
+                "whisrsd is not running. Start it with:\n\
+                 \n\
+                 \x20 whisrsd &{service_hint}"
+            );
             if use_color {
-                eprintln!(
-                    "{RED}whisrsd is not running.{RESET} Start it with:\n\
-                     \n\
-                     \x20 whisrsd &\n\
-                     \n\
-                     Or enable the systemd service:\n\
-                     \n\
-                     \x20 systemctl --user enable --now whisrs.service"
-                );
+                eprintln!("{RED}{msg}{RESET}");
             } else {
-                eprintln!(
-                    "whisrsd is not running. Start it with:\n\
-                     \n\
-                     \x20 whisrsd &\n\
-                     \n\
-                     Or enable the systemd service:\n\
-                     \n\
-                     \x20 systemctl --user enable --now whisrs.service"
-                );
+                eprintln!("{msg}");
             }
             process::exit(1);
         }

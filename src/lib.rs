@@ -11,7 +11,7 @@ pub mod llm;
 #[cfg(feature = "hooks")]
 pub mod mpris;
 pub mod overlay;
-pub mod service_ctl;
+pub mod service;
 pub mod state;
 pub mod transcription;
 pub mod tray;
@@ -20,7 +20,7 @@ pub mod window;
 
 pub use config::types::*;
 pub use ipc::*;
-pub use service_ctl::*;
+pub use service::RestartOutcome;
 
 #[cfg(feature = "local-whisper")]
 pub(crate) use config::types::default_phrase_silence_ms;

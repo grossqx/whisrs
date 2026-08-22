@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use super::NotifyFn;
-use crate::service_ctl::{restart_daemon_via_systemd, RestartOutcome};
+use crate::service::{RestartOutcome, ServiceManager};
 use crate::{Command, State};
 
 /// 16x16 ARGB icon data for each state.
@@ -193,40 +193,45 @@ impl ksni::Tray for WhisrsTray {
     }
 }
 
-/// Restart the daemon through systemd, from the tray menu.
+/// Restart the daemon through the detected service manager, from the tray menu.
 ///
 /// This cannot go through the daemon's own command loop: a successful restart
 /// kills this very process before it could reply. Runs on its own thread
-/// because ksni menu callbacks must not block and `systemctl` is a subprocess
+/// because ksni menu callbacks must not block and the restart is a subprocess
 /// round-trip.
 ///
-/// Failure raises a desktop toast (when `notify` is set): without one, a
-/// click on a non-systemd setup would silently do nothing, since journal
+/// Failure raises a desktop toast (when `notify` is set): without one, a click
+/// on a setup with no installed service would silently do nothing, since log
 /// warnings are invisible from the tray.
 fn restart_daemon(notify: Option<NotifyFn>) {
     info!("tray: restart requested");
-    std::thread::spawn(move || match restart_daemon_via_systemd() {
-        // When this daemon runs under the unit, systemd kills it mid-restart,
-        // so this line is normally never reached.
-        RestartOutcome::Restarted => info!("tray: daemon restarted via systemd"),
-        RestartOutcome::NoSystemdUnit => {
-            warn!("tray: no whisrs.service user unit loaded — restart the daemon manually");
-            if let Some(notify) = notify {
-                notify(
-                    "whisrs",
-                    "Restart from the tray needs the whisrs.service systemd unit. \
-                     Restart the daemon manually.",
-                );
+    std::thread::spawn(move || {
+        let manager = ServiceManager::detect();
+        match manager.restart() {
+            // When this daemon runs under the service, the manager kills it
+            // mid-restart, so this line is normally never reached.
+            RestartOutcome::Restarted => {
+                info!("tray: daemon restarted via {}", manager.name())
             }
-        }
-        RestartOutcome::Failed => {
-            warn!("tray: `systemctl --user restart whisrs.service` failed");
-            if let Some(notify) = notify {
-                notify(
-                    "whisrs",
-                    "Daemon restart failed: `systemctl --user restart whisrs.service` \
-                     returned an error.",
-                );
+            RestartOutcome::NoService => {
+                warn!("tray: no whisrs user service installed — restart the daemon manually");
+                if let Some(notify) = notify {
+                    notify(
+                        "whisrs",
+                        "Restart from the tray needs an installed whisrs user service. \
+                         Restart the daemon manually.",
+                    );
+                }
+            }
+            RestartOutcome::Failed => {
+                let hint = manager.restart_hint().unwrap_or("the restart command");
+                warn!("tray: `{hint}` failed");
+                if let Some(notify) = notify {
+                    notify(
+                        "whisrs",
+                        &format!("Daemon restart failed: `{hint}` returned an error."),
+                    );
+                }
             }
         }
     });

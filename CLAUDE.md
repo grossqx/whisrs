@@ -55,7 +55,7 @@ Cargo workspace: the root package builds two binaries, plus five extracted crate
 src/
 ├── lib.rs                  # Crate root: WhisrsError + re-exports (config types, IPC, service ctl)
 ├── ipc.rs                  # IPC protocol: commands, responses, socket path, wire framing
-├── service_ctl.rs          # Daemon restart via systemd (shared by CLI and config editor)
+├── service.rs              # Init abstraction (systemd/OpenRC): detect, restart, install hints
 ├── state.rs                # State machine (Idle → Recording → Transcribing → Idle;
 │                           #   read-aloud: Idle → Synthesizing → Speaking → Idle)
 ├── history.rs              # Dictation history (whisrs log)

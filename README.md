@@ -184,7 +184,31 @@ cargo install --path .
 whisrs setup
 ```
 
-The interactive setup will walk you through backend selection, API keys / model download, microphone test, uinput permissions, systemd service, and keybindings.
+The interactive setup will walk you through backend selection, API keys / model download, microphone test, uinput permissions, the user service, and keybindings.
+
+Setup detects your init system and installs the matching service — a systemd user unit from `contrib/whisrs.service`, or an OpenRC user service from `contrib/openrc/`. To install by hand instead:
+
+<details>
+<summary>systemd</summary>
+
+```bash
+install -Dm644 contrib/whisrs.service ~/.config/systemd/user/whisrs.service
+systemctl --user enable --now whisrs.service
+```
+</details>
+
+<details>
+<summary>OpenRC (user mode, OpenRC >= 0.55)</summary>
+
+```bash
+install -Dm755 contrib/openrc/whisrs.initd ~/.config/rc/init.d/whisrs
+install -Dm644 contrib/openrc/whisrs.confd ~/.config/rc/conf.d/whisrs
+rc-update --user add whisrs default
+rc-service --user whisrs start
+```
+
+Tunables live in `~/.config/rc/conf.d/whisrs`. Logs go to `~/.local/state/whisrs/whisrsd.log` rather than a journal.
+</details>
 
 #### 4. Bind a hotkey
 
@@ -254,7 +278,7 @@ whisrs toggle    # Start/stop recording (uses general.language)
 whisrs toggle -l en  # Start/stop recording, overriding the language for this session
 whisrs cancel    # Cancel recording, discard audio
 whisrs status    # Query daemon state
-whisrs restart   # Restart the daemon (uses the systemd user service when present)
+whisrs restart   # Restart the daemon (uses the systemd or OpenRC user service when present)
 whisrs command   # Command mode: select text + speak instruction → LLM rewrite
 whisrs llm-command <name>      # Toggle a named [[llm_commands]] entry (see config.toml)
 whisrs llm-command-set <name>  # Reprogram a named LLM command from the current selection
@@ -361,11 +385,9 @@ RUST_LOG=debug whisrsd
 If the layout is missing or wrong, fix it one of two ways:
 
 1. Make sure `localectl status` reports the right `X11 Layout` and `X11 Variant`. This is the system source-of-truth and works without any X session env vars.
-2. Force the layout via env vars in your systemd service override:
+2. Force the layout via env vars on the service.
 
-   ```bash
-   systemctl --user edit whisrs.service
-   ```
+   systemd — `systemctl --user edit whisrs.service`:
 
    ```ini
    [Service]
@@ -374,6 +396,15 @@ If the layout is missing or wrong, fix it one of two ways:
    ```
 
    Then `systemctl --user restart whisrs.service`.
+
+   OpenRC — add to `~/.config/rc/conf.d/whisrs`:
+
+   ```sh
+   XKB_DEFAULT_LAYOUT="fr"
+   XKB_DEFAULT_VARIANT="bepo"
+   ```
+
+   Then `rc-service --user whisrs restart`.
 
 ### Hotkey keys are physical positions, not layout characters
 

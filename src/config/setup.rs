@@ -2,10 +2,11 @@
 //!
 //! Guides the user through selecting a backend, entering an API key,
 //! choosing a language, testing the microphone, writing `config.toml`,
-//! setting up uinput permissions, installing the systemd service,
+//! setting up uinput permissions, installing the user service,
 //! and configuring keybindings.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,6 +14,7 @@ use dialoguer::{Confirm, Input, Password, Select};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
 use crate::llm::LlmConfig;
+use crate::service::{ServiceManager, OPENRC_SERVICE, SYSTEMD_UNIT};
 use crate::{
     AsrSidecarConfig, AudioConfig, Config, DeepgramConfig, GeneralConfig, GroqConfig,
     InjectorBackend, InputConfig, LocalWhisperConfig, OpenAiCompatibleRealtimeConfig, OpenAiConfig,
@@ -188,8 +190,8 @@ pub fn run_setup() -> Result<()> {
     // 7. Check and optionally fix uinput permissions.
     setup_uinput_permissions();
 
-    // 8. Offer to install and enable the systemd service.
-    setup_systemd_service();
+    // 8. Offer to install and enable the user service.
+    setup_user_service();
 
     // 9. Offer to add keybinding.
     setup_keybinding();
@@ -1192,31 +1194,37 @@ fn setup_uinput_permissions() {
     }
 }
 
-/// Offer to install and enable the systemd user service.
-fn setup_systemd_service() {
-    println!("\n{BOLD}Systemd service...{RESET}");
+/// Offer to install and enable the user service for the detected init system.
+fn setup_user_service() {
+    let manager = ServiceManager::detect();
 
-    let user_service_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("systemd/user");
-    let dest = user_service_dir.join("whisrs.service");
+    if manager == ServiceManager::None {
+        println!("\n{BOLD}Auto-start service...{RESET}");
+        println!("  {YELLOW}Neither systemd nor OpenRC detected.{RESET}");
+        println!("  {DIM}Start the daemon manually, or wire it into your session:{RESET}");
+        println!("    whisrsd &");
+        return;
+    }
 
-    // Check if service is already installed.
+    println!("\n{BOLD}{} service...{RESET}", manager.name());
+
+    let Some(unit_dir) = manager.unit_dir() else {
+        println!("  {RED}Could not determine a config directory to install into{RESET}");
+        return;
+    };
+    let dest = match manager {
+        ServiceManager::Systemd => unit_dir.join(SYSTEMD_UNIT),
+        ServiceManager::OpenRc => unit_dir.join(OPENRC_SERVICE),
+        ServiceManager::None => unreachable!("handled above"),
+    };
+
     if dest.exists() {
         println!(
             "  {GREEN}Service already installed at {}{RESET}",
             dest.display()
         );
-
-        // Check if it's already enabled.
-        let enabled = std::process::Command::new("systemctl")
-            .args(["--user", "is-enabled", "whisrs.service"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
-            .unwrap_or(false);
-
-        if enabled {
-            println!("  {GREEN}Service is already enabled{RESET}");
+        if manager.service_installed() && manager.is_active() {
+            println!("  {GREEN}Service is already enabled and running{RESET}");
             return;
         }
     }
@@ -1224,7 +1232,7 @@ fn setup_systemd_service() {
     let choice = Select::new()
         .with_prompt("Enable whisrs daemon to start automatically?")
         .items(&[
-            "Yes — install and enable systemd service",
+            format!("Yes — install and enable {} service", manager.name()).as_str(),
             "No — I'll start it manually",
         ])
         .default(0)
@@ -1232,76 +1240,250 @@ fn setup_systemd_service() {
 
     match choice {
         Ok(0) => {
-            // Create the systemd user directory if needed.
-            if let Err(e) = fs::create_dir_all(&user_service_dir) {
-                println!(
-                    "  {RED}Failed to create {}: {e}{RESET}",
-                    user_service_dir.display()
-                );
+            if let Err(e) = fs::create_dir_all(&unit_dir) {
+                println!("  {RED}Failed to create {}: {e}{RESET}", unit_dir.display());
                 return;
             }
-
-            // Find the service file source.
-            let service_src = find_contrib_file("whisrs.service");
-
-            if let Some(src) = service_src {
-                // Copy the service file.
-                if let Err(e) = fs::copy(&src, &dest) {
-                    println!("  {RED}Failed to copy service file: {e}{RESET}");
-                    return;
-                }
-            } else {
-                // Write the service file inline.
-                let whisrsd_path = which_whisrsd();
-                let service_content = format!(
-                    "[Unit]\n\
-                     Description=whisrs dictation daemon\n\
-                     After=graphical-session.target\n\
-                     \n\
-                     [Service]\n\
-                     Type=simple\n\
-                     ExecStart={whisrsd_path}\n\
-                     Restart=on-failure\n\
-                     RestartSec=3\n\
-                     PassEnvironment=HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET SWAYSOCK WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR\n\
-                     StandardOutput=journal\n\
-                     StandardError=journal\n\
-                     \n\
-                     [Install]\n\
-                     WantedBy=default.target\n"
-                );
-                if let Err(e) = fs::write(&dest, &service_content) {
-                    println!("  {RED}Failed to write service file: {e}{RESET}");
-                    return;
-                }
+            if !write_service_file(manager, &dest) {
+                return;
             }
-
             println!("  {GREEN}Installed service to {}{RESET}", dest.display());
-
-            // Reload and enable.
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .status();
-            let status = std::process::Command::new("systemctl")
-                .args(["--user", "enable", "--now", "whisrs.service"])
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("  {GREEN}Service enabled and started{RESET}");
-                }
-                _ => {
-                    println!("  {YELLOW}Failed to enable service — you can do it manually:{RESET}");
-                    println!("    systemctl --user enable --now whisrs.service");
-                }
-            }
+            enable_service(manager);
         }
         _ => {
             println!("  {DIM}You can start the daemon manually: whisrsd &{RESET}");
             println!("  {DIM}Or enable the service later:{RESET}");
-            println!("    cp contrib/whisrs.service ~/.config/systemd/user/");
-            println!("    systemctl --user enable --now whisrs.service");
+            // Enabling only works once the service file is installed, so name
+            // the install step too — `systemctl enable` on its own fails with
+            // "Unit does not exist".
+            match manager {
+                ServiceManager::Systemd => {
+                    println!("    cp contrib/whisrs.service ~/.config/systemd/user/");
+                }
+                ServiceManager::OpenRc => {
+                    println!(
+                        "    install -Dm755 contrib/openrc/whisrs.initd ~/.config/rc/init.d/whisrs"
+                    );
+                    println!(
+                        "    install -Dm644 contrib/openrc/whisrs.confd ~/.config/rc/conf.d/whisrs"
+                    );
+                }
+                ServiceManager::None => {}
+            }
+            if let Some(enable) = manager.enable_hint() {
+                println!("    {enable}");
+            }
         }
     }
+}
+
+/// Write the service definition for `manager` to `dest`.
+///
+/// Prefers the file shipped in `contrib/`, falling back to an inline copy for
+/// installs where `contrib/` isn't on disk (e.g. `cargo install`). Returns
+/// false when it printed an error and the caller should stop.
+fn write_service_file(manager: ServiceManager, dest: &Path) -> bool {
+    let contrib_name = match manager {
+        ServiceManager::Systemd => "whisrs.service",
+        ServiceManager::OpenRc => "openrc/whisrs.initd",
+        ServiceManager::None => return false,
+    };
+
+    if let Some(src) = find_contrib_file(contrib_name) {
+        if let Err(e) = fs::copy(&src, dest) {
+            println!("  {RED}Failed to copy service file: {e}{RESET}");
+            return false;
+        }
+    } else {
+        let whisrsd_path = which_whisrsd();
+        let content = match manager {
+            ServiceManager::Systemd => systemd_unit_contents(&whisrsd_path),
+            ServiceManager::OpenRc => openrc_initd_contents(&whisrsd_path),
+            ServiceManager::None => return false,
+        };
+        if let Err(e) = fs::write(dest, &content) {
+            println!("  {RED}Failed to write service file: {e}{RESET}");
+            return false;
+        }
+    }
+
+    // OpenRC init scripts are executed directly, so they must be executable —
+    // a copied or freshly written file is not, by default.
+    if manager == ServiceManager::OpenRc {
+        if let Err(e) = fs::set_permissions(dest, fs::Permissions::from_mode(0o755)) {
+            println!("  {RED}Failed to make init script executable: {e}{RESET}");
+            return false;
+        }
+        install_openrc_confd();
+    }
+    true
+}
+
+/// Install the OpenRC conf.d tunables file next to the init script.
+///
+/// The init script defaults every value it reads, so a missing conf.d is not a
+/// failure — but README and docs/troubleshooting.md both point users at
+/// `~/.config/rc/conf.d/whisrs`, so it should exist for them to edit. Never
+/// overwrites: the file holds user settings and may hold API keys.
+fn install_openrc_confd() {
+    let Some(dir) = dirs::config_dir().map(|c| c.join("rc/conf.d")) else {
+        return;
+    };
+    let dest = dir.join(OPENRC_SERVICE);
+    if dest.exists() {
+        return;
+    }
+    let Some(src) = find_contrib_file("openrc/whisrs.confd") else {
+        // Inline fallback (`cargo install`, no contrib/ on disk) ships no
+        // conf.d; the init script's defaults cover it.
+        return;
+    };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        println!("  {YELLOW}Could not create {}: {e}{RESET}", dir.display());
+        return;
+    }
+    match fs::copy(&src, &dest) {
+        Ok(_) => {
+            // May hold API keys, so keep it owner-only rather than the 0644
+            // the README suggests for a bare tunables file.
+            let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o600));
+            println!("  {GREEN}Installed tunables to {}{RESET}", dest.display());
+        }
+        Err(e) => {
+            println!("  {YELLOW}Could not install conf.d tunables: {e}{RESET}");
+        }
+    }
+}
+
+/// Enable and start the service, reporting a manual fallback on failure.
+fn enable_service(manager: ServiceManager) {
+    let ok = match manager {
+        ServiceManager::Systemd => {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+            std::process::Command::new("systemctl")
+                .args(["--user", "enable", "--now", SYSTEMD_UNIT])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        ServiceManager::OpenRc => {
+            let added = std::process::Command::new("rc-update")
+                .args(["--user", "add", OPENRC_SERVICE, "default"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            let started = std::process::Command::new("rc-service")
+                .args(["--user", OPENRC_SERVICE, "start"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            added && started
+        }
+        ServiceManager::None => false,
+    };
+
+    if ok {
+        println!("  {GREEN}Service enabled and started{RESET}");
+    } else {
+        println!("  {YELLOW}Failed to enable service — you can do it manually:{RESET}");
+        if let Some(enable) = manager.enable_hint() {
+            println!("    {enable}");
+        }
+    }
+}
+
+/// Inline systemd unit, used when `contrib/whisrs.service` isn't on disk.
+fn systemd_unit_contents(whisrsd_path: &str) -> String {
+    format!(
+        "[Unit]\n\
+         Description=whisrs dictation daemon\n\
+         After=graphical-session.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={whisrsd_path}\n\
+         Restart=on-failure\n\
+         RestartSec=3\n\
+         PassEnvironment=HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET SWAYSOCK WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR\n\
+         StandardOutput=journal\n\
+         StandardError=journal\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n"
+    )
+}
+
+/// Inline OpenRC init script, used when `contrib/openrc/` isn't on disk.
+///
+/// This is a reduced version of `contrib/openrc/whisrs.initd` — it keeps the
+/// supervision and session-environment recovery, which the daemon cannot work
+/// without, but drops the conf.d tunables. Users who want those should install
+/// the full script from contrib.
+fn openrc_initd_contents(whisrsd_path: &str) -> String {
+    format!(
+        "#!/sbin/openrc-run\n\
+         # whisrs dictation daemon — OpenRC user service\n\
+         \n\
+         description=\"whisrs dictation daemon\"\n\
+         command=\"{whisrsd_path}\"\n\
+         supervisor=\"supervise-daemon\"\n\
+         respawn_delay=3\n\
+         respawn_max=5\n\
+         respawn_period=60\n\
+         \n\
+         : \"${{whisrsd_log_dir:=${{XDG_STATE_HOME:-$HOME/.local/state}}/whisrs}}\"\n\
+         output_log=\"${{whisrsd_log_dir}}/whisrsd.log\"\n\
+         error_log=\"${{whisrsd_log_dir}}/whisrsd.log\"\n\
+         \n\
+         # conf.d variables are sourced, not exported — re-export the ones\n\
+         # whisrsd reads from its own environment, or they are silently lost.\n\
+         for _var in RUST_LOG \\\n\
+         \tWHISRS_DEEPGRAM_API_KEY WHISRS_GROQ_API_KEY WHISRS_OPENAI_API_KEY \\\n\
+         \tXKB_DEFAULT_LAYOUT XKB_DEFAULT_VARIANT\n\
+         do\n\
+         \teval \"[ -n \\\"\\${{$_var}}\\\" ]\" && export \"$_var\"\n\
+         done\n\
+         \n\
+         start_pre() {{\n\
+         \tcheckpath -d -m 0700 \"$whisrsd_log_dir\" || return 1\n\
+         \n\
+         \t# OpenRC scrubs the environment, so recover the session vars the\n\
+         \t# daemon needs. The compositor's environ holds what it inherited;\n\
+         \t# what it created after exec is derived from the runtime dir.\n\
+         \tfor _p in $(pgrep -u \"$(id -u)\" -x 'Hyprland|sway|niri|gnome-shell|kwin_wayland|labwc|river' 2>/dev/null); do\n\
+         \t\tfor _v in DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XAUTHORITY; do\n\
+         \t\t\teval \"[ -n \\\"\\${{$_v}}\\\" ]\" && continue\n\
+         \t\t\t_val=$(tr '\\0' '\\n' < \"/proc/$_p/environ\" 2>/dev/null | sed -n \"s/^$_v=//p\" | head -1)\n\
+         \t\t\t[ -n \"$_val\" ] && export \"$_v=$_val\"\n\
+         \t\tdone\n\
+         \t\tbreak\n\
+         \tdone\n\
+         \t[ -n \"$WAYLAND_DISPLAY\" ] || for _s in \"$XDG_RUNTIME_DIR\"/wayland-[0-9]*; do\n\
+         \t\t[ -S \"$_s\" ] && export WAYLAND_DISPLAY=\"${{_s##*/}}\" && break\n\
+         \tdone\n\
+         \t[ -n \"$HYPRLAND_INSTANCE_SIGNATURE\" ] || for _d in $(ls -1td \"$XDG_RUNTIME_DIR\"/hypr/*/ 2>/dev/null); do\n\
+         \t\texport HYPRLAND_INSTANCE_SIGNATURE=\"$(basename \"$_d\")\"; break\n\
+         \tdone\n\
+         \t[ -n \"$DISPLAY\" ] || for _p in $(pgrep -u \"$(id -u)\" -x Xwayland 2>/dev/null); do\n\
+         \t\t# Compositors that pass -displayfd have no :N in argv; exporting\n\
+         \t\t# an empty DISPLAY is worse than leaving it unset.\n\
+         \t\t_val=$(tr '\\0' '\\n' < \"/proc/$_p/cmdline\" 2>/dev/null | sed -n '/^:[0-9][0-9]*$/p' | head -1)\n\
+         \t\t[ -n \"$_val\" ] && export DISPLAY=\"$_val\"\n\
+         \t\tbreak\n\
+         \tdone\n\
+         \t[ -n \"$SWAYSOCK\" ] || for _s in \"$XDG_RUNTIME_DIR\"/sway-ipc.*.sock; do\n\
+         \t\t[ -S \"$_s\" ] && export SWAYSOCK=\"$_s\" && break\n\
+         \tdone\n\
+         \t[ -n \"$NIRI_SOCKET\" ] || for _s in \"$XDG_RUNTIME_DIR\"/niri.*.sock; do\n\
+         \t\t[ -S \"$_s\" ] && export NIRI_SOCKET=\"$_s\" && break\n\
+         \tdone\n\
+         \tif [ -z \"$DBUS_SESSION_BUS_ADDRESS\" ] && [ -S \"$XDG_RUNTIME_DIR/bus\" ]; then\n\
+         \t\texport DBUS_SESSION_BUS_ADDRESS=\"unix:path=$XDG_RUNTIME_DIR/bus\"\n\
+         \tfi\n\
+         }}\n"
+    )
 }
 
 /// Detect the compositor and offer to add a keybinding for `whisrs toggle`.
@@ -1890,10 +2072,18 @@ pub(crate) fn select_llm_model(provider_idx: usize) -> Result<String> {
 
 /// Print the final success message.
 fn print_done() {
+    // OpenRC has no journal — the init script logs to a file instead.
+    let logs = match ServiceManager::detect() {
+        ServiceManager::OpenRc => {
+            "${XDG_STATE_HOME:-~/.local/state}/whisrs/whisrsd.log".to_string()
+        }
+        _ => "journalctl --user -u whisrs -f".to_string(),
+    };
+
     println!("\n{GREEN}{BOLD}You're all set!{RESET}");
     println!();
     println!("  {DIM}Config:    ~/.config/whisrs/config.toml{RESET}");
-    println!("  {DIM}Logs:      journalctl --user -u whisrs -f{RESET}");
+    println!("  {DIM}Logs:      {logs}{RESET}");
     println!("  {DIM}Re-run:    whisrs setup (to change backend or settings){RESET}");
     println!();
     println!("  You can adjust all settings (filler words, audio feedback, silence");
@@ -1906,6 +2096,65 @@ fn print_done() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inline OpenRC fallback is used on `cargo install`, where `contrib/`
+    /// is not on disk. It is a hand-maintained copy of
+    /// `contrib/openrc/whisrs.initd`, so it silently drifts: an earlier
+    /// revision omitted the conf.d re-export loop, which made
+    /// `XKB_DEFAULT_LAYOUT` in conf.d a no-op with no diagnostic.
+    #[test]
+    fn inline_openrc_fallback_reexports_confd_vars() {
+        let script = openrc_initd_contents("/usr/bin/whisrsd");
+        for var in [
+            "RUST_LOG",
+            "WHISRS_DEEPGRAM_API_KEY",
+            "WHISRS_GROQ_API_KEY",
+            "WHISRS_OPENAI_API_KEY",
+            "XKB_DEFAULT_LAYOUT",
+            "XKB_DEFAULT_VARIANT",
+        ] {
+            assert!(
+                script.contains(var),
+                "inline OpenRC fallback must re-export {var}; conf.d values are \
+                 sourced, not exported, so omitting it silently drops the setting"
+            );
+        }
+    }
+
+    /// Exporting an empty `DISPLAY` is worse than leaving it unset: it makes
+    /// x11rb and clipboard calls fail confusingly instead of being skipped.
+    /// Compositors that spawn Xwayland with `-displayfd` have no `:N` in argv.
+    #[test]
+    fn inline_openrc_fallback_guards_empty_display() {
+        let script = openrc_initd_contents("/usr/bin/whisrsd");
+        assert!(
+            !script.contains("export DISPLAY=\"$(tr"),
+            "DISPLAY must be captured first and exported only when non-empty"
+        );
+        assert!(script.contains("[ -n \"$_val\" ] && export DISPLAY=\"$_val\""));
+    }
+
+    /// `openrc-run` parses the whole script at start, so a syntax error means
+    /// the service never starts. Nothing else here executes it.
+    #[test]
+    fn inline_openrc_fallback_is_valid_shell() {
+        let script = openrc_initd_contents("/usr/bin/whisrsd");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whisrs");
+        // Drop the openrc-run shebang: `sh -n` only checks syntax, and
+        // /sbin/openrc-run does not exist on non-OpenRC machines.
+        fs::write(&path, script.replacen("#!/sbin/openrc-run", "#!/bin/sh", 1)).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&path)
+            .output()
+            .expect("failed to run sh -n");
+        assert!(
+            out.status.success(),
+            "inline OpenRC fallback is not valid shell: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     /// A config the way a user actually writes it: header comments, inline
     /// comments, custom section order ([audio] before [general]), and
