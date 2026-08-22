@@ -743,7 +743,7 @@ mod tests {
         let t = Theme::ember();
         draw_overlay(&mut pm, State::Recording, 0, 1.0, shown(), &t);
         // tiny-skia stores premultiplied RGBA; alpha lives in the 4th byte.
-        assert!(pm.data().chunks_exact(4).any(|px| px[3] != 0));
+        assert!(pm.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0));
     }
 
     #[test]
@@ -753,7 +753,9 @@ mod tests {
         // speaking frame paints green-dominant bar pixels that the recording
         // frame does not.
         fn green_dominant(data: &[u8]) -> usize {
-            data.chunks_exact(4)
+            data.as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|px| px[1] > 150 && px[0] < 120 && px[1] > px[0])
                 .count()
         }
@@ -777,7 +779,7 @@ mod tests {
         let mut pm = fresh_pixmap();
         let t = Theme::ember();
         draw_overlay(&mut pm, State::Synthesizing, 0, 0.0, shown(), &t);
-        assert!(pm.data().chunks_exact(4).any(|px| px[3] != 0));
+        assert!(pm.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0));
     }
 
     #[test]
@@ -808,7 +810,9 @@ mod tests {
         // count amber-dominant pixels (high R, mid G, low B) to measure
         // bar area independent of the bg pill.
         fn amber_pixels(data: &[u8]) -> usize {
-            data.chunks_exact(4)
+            data.as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|px| px[0] > 200 && px[1] > 70 && px[1] < 180 && px[2] < 60)
                 .count()
         }
