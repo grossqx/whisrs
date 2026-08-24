@@ -263,7 +263,7 @@ overlay = false    # bottom-screen recording overlay
 api_key = "gsk_..."
 ```
 
-Env-var overrides: `WHISRS_GROQ_API_KEY`, `WHISRS_DEEPGRAM_API_KEY`, `WHISRS_OPENAI_API_KEY`.
+Env-var overrides: `WHISRS_GROQ_API_KEY`, `WHISRS_DEEPGRAM_API_KEY`, `WHISRS_OPENAI_API_KEY`, `WHISRS_ASR_SIDECAR_API_KEY`.
 
 For the full reference (overlay, `[input]`, `[openai-compatible-realtime]`, `[asr-sidecar]`, `[llm]`, `[hotkeys]`, `[hooks]`, GNOME extension setup), see [docs/configuration.md](docs/configuration.md).
 

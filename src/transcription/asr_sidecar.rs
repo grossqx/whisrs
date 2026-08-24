@@ -18,14 +18,18 @@ const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
 pub struct AsrSidecarBackend {
     client: reqwest::Client,
     url: String,
+    api_key: Option<String>,
 }
 
 impl AsrSidecarBackend {
-    /// Create a new sidecar backend with the transcription URL.
-    pub fn new(url: String) -> Self {
+    /// Create a new sidecar backend with the transcription URL and optional API key.
+    pub fn new(url: String, api_key: Option<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url,
+            api_key: api_key
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
         }
     }
 }
@@ -102,7 +106,18 @@ impl TranscriptionBackend for AsrSidecarBackend {
             form = form.text("hotwords", prompt.clone());
         }
 
-        let response = self.client.post(&self.url).multipart(form).send().await?;
+        // Some OpenAI-compatible endpoints 307-redirect when the URL has a trailing
+        // slash, which can downgrade http→https and cause reqwest to abort multipart
+        // POSTs. Trim trailing slashes so both forms work without a redirect.
+        let effective_url = self.url.trim_end_matches('/');
+        if effective_url != self.url {
+            debug!("trimmed trailing slashes from ASR sidecar URL: {effective_url}");
+        }
+        let mut request = self.client.post(effective_url);
+        if let Some(key) = &self.api_key {
+            request = request.header("Authorization", format!("Bearer {key}"));
+        }
+        let response = request.multipart(form).send().await?;
         let status = response.status();
         let body = response.text().await?;
 
@@ -137,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_rejects_empty_audio() {
-        let backend = AsrSidecarBackend::new("http://127.0.0.1:8765/transcribe".to_string());
+        let backend = AsrSidecarBackend::new("http://127.0.0.1:8765/transcribe".to_string(), None);
         let config = TranscriptionConfig {
             language: "en".to_string(),
             model: "test-asr-model".to_string(),
@@ -149,7 +164,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_rejects_missing_url() {
-        let backend = AsrSidecarBackend::new(String::new());
+        let backend = AsrSidecarBackend::new(String::new(), None);
         let config = TranscriptionConfig {
             language: "en".to_string(),
             model: "test-asr-model".to_string(),
@@ -157,6 +172,42 @@ mod tests {
         };
         let err = backend.transcribe(&[1, 2, 3], &config).await.unwrap_err();
         assert!(err.to_string().contains("sidecar URL"));
+    }
+
+    #[test]
+    fn empty_api_key_is_normalized_to_none() {
+        let backend = AsrSidecarBackend::new(
+            "http://127.0.0.1:8765/transcribe".to_string(),
+            Some(String::new()),
+        );
+        assert!(backend.api_key.is_none());
+    }
+
+    #[test]
+    fn api_key_is_stored_when_present() {
+        let backend = AsrSidecarBackend::new(
+            "http://127.0.0.1:8765/transcribe".to_string(),
+            Some("sk-test-key".to_string()),
+        );
+        assert_eq!(backend.api_key.as_deref(), Some("sk-test-key"));
+    }
+
+    #[test]
+    fn whitespace_only_api_key_is_normalized_to_none() {
+        let backend = AsrSidecarBackend::new(
+            "http://127.0.0.1:8765/transcribe".to_string(),
+            Some("   ".to_string()),
+        );
+        assert!(backend.api_key.is_none());
+    }
+
+    #[test]
+    fn api_key_whitespace_is_trimmed() {
+        let backend = AsrSidecarBackend::new(
+            "http://127.0.0.1:8765/transcribe".to_string(),
+            Some("  sk-test-key  ".to_string()),
+        );
+        assert_eq!(backend.api_key.as_deref(), Some("sk-test-key"));
     }
 
     #[test]

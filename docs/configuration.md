@@ -408,6 +408,7 @@ The following variables override the matching `api_key` in `config.toml`:
 - `WHISRS_GROQ_API_KEY`
 - `WHISRS_DEEPGRAM_API_KEY`
 - `WHISRS_OPENAI_API_KEY`
+- `WHISRS_ASR_SIDECAR_API_KEY`
 
 These provider keys are also used by the matching TTS backend (`groq`/`openai`/`deepgram`) unless `[tts] api_key` is set. The `tts-sidecar` backend needs no key.
 

@@ -65,6 +65,21 @@ fn resolve_deepgram_api_key(config: &Config) -> Option<String> {
     config.deepgram.as_ref().map(|d| d.api_key.clone())
 }
 
+fn resolve_asr_sidecar_api_key(config: &Config) -> Option<String> {
+    if let Ok(key) = std::env::var("WHISRS_ASR_SIDECAR_API_KEY") {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    config
+        .asr_sidecar
+        .as_ref()
+        .and_then(|s| s.api_key.as_deref())
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
 fn sanitize_ws_endpoint_for_log(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return "<invalid ws endpoint>".to_string();
@@ -174,13 +189,16 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
             Arc::new(ParakeetBackend::new(model_path))
         }
         "asr-sidecar" | "asr" | "vibevoice" => {
-            let url = config
-                .asr_sidecar
-                .as_ref()
+            let sidecar = config.asr_sidecar.as_ref();
+            let url = sidecar
                 .map(|v| v.url.clone())
                 .unwrap_or_else(|| "http://127.0.0.1:8765/transcribe".to_string());
+            let api_key = resolve_asr_sidecar_api_key(config);
+            if api_key.is_some() {
+                info!("ASR sidecar API key configured");
+            }
             info!("using ASR sidecar transcription backend ({url})");
-            Arc::new(AsrSidecarBackend::new(url))
+            Arc::new(AsrSidecarBackend::new(url, api_key))
         }
         "openai-compatible-realtime" => {
             let realtime = config.openai_compatible_realtime.as_ref().cloned();

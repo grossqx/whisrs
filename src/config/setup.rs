@@ -516,8 +516,18 @@ pub(crate) fn configure_backend(
                 .interact_text()
                 .context("failed to read ASR sidecar model")?;
 
+            let api_key = prompt_optional_api_key_with_existing(
+                "Optional bearer token",
+                "Leave blank for local sidecars that do not require auth.",
+                existing_sidecar.and_then(|v| v.api_key.as_ref()),
+            )?;
+
             Ok(BackendConfigSelection {
-                asr_sidecar: Some(AsrSidecarConfig { url, model }),
+                asr_sidecar: Some(AsrSidecarConfig {
+                    url,
+                    model,
+                    api_key,
+                }),
                 ..BackendConfigSelection::default()
             })
         }
