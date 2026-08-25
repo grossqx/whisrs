@@ -18,6 +18,7 @@
 #WHISRS_DEEPGRAM_API_KEY=""
 #WHISRS_GROQ_API_KEY=""
 #WHISRS_OPENAI_API_KEY=""
+#WHISRS_ASR_SIDECAR_API_KEY=""
 
 # Where whisrsd's stdout/stderr are written.
 # Default: ${XDG_STATE_HOME:-$HOME/.local/state}/whisrs
