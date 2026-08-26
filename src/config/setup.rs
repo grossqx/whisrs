@@ -516,8 +516,18 @@ pub(crate) fn configure_backend(
                 .interact_text()
                 .context("failed to read ASR sidecar model")?;
 
+            let api_key = prompt_optional_api_key_with_existing(
+                "Optional bearer token",
+                "Leave blank for local sidecars that do not require auth.",
+                existing_sidecar.and_then(|v| v.api_key.as_ref()),
+            )?;
+
             Ok(BackendConfigSelection {
-                asr_sidecar: Some(AsrSidecarConfig { url, model }),
+                asr_sidecar: Some(AsrSidecarConfig {
+                    url,
+                    model,
+                    api_key,
+                }),
                 ..BackendConfigSelection::default()
             })
         }
@@ -1441,6 +1451,7 @@ fn openrc_initd_contents(whisrsd_path: &str) -> String {
          # whisrsd reads from its own environment, or they are silently lost.\n\
          for _var in RUST_LOG \\\n\
          \tWHISRS_DEEPGRAM_API_KEY WHISRS_GROQ_API_KEY WHISRS_OPENAI_API_KEY \\\n\
+         \tWHISRS_ASR_SIDECAR_API_KEY \\\n\
          \tXKB_DEFAULT_LAYOUT XKB_DEFAULT_VARIANT\n\
          do\n\
          \teval \"[ -n \\\"\\${{$_var}}\\\" ]\" && export \"$_var\"\n\
@@ -2097,28 +2108,69 @@ fn print_done() {
 mod tests {
     use super::*;
 
+    /// Slice out the `for _var in ... done` conf.d re-export loop.
+    ///
+    /// Searching the whole script for a variable name is also satisfied by a
+    /// name that only appears in the comment above the loop — which is exactly
+    /// the drift being guarded against — so the assertions below run against
+    /// the loop alone.
+    fn confd_reexport_loop(script: &str) -> &str {
+        const END: &str = "\ndone\n";
+        let start = script
+            .find("for _var in ")
+            .expect("OpenRC script must re-export conf.d variables");
+        let from_loop = &script[start..];
+        let end = from_loop
+            .find(END)
+            .expect("conf.d re-export loop must be terminated by `done`")
+            + END.len();
+        &from_loop[..end]
+    }
+
     /// The inline OpenRC fallback is used on `cargo install`, where `contrib/`
     /// is not on disk. It is a hand-maintained copy of
     /// `contrib/openrc/whisrs.initd`, so it silently drifts: an earlier
     /// revision omitted the conf.d re-export loop, which made
     /// `XKB_DEFAULT_LAYOUT` in conf.d a no-op with no diagnostic.
+    ///
+    /// `contrib/openrc/whisrs.initd` is the copy users actually install, so it
+    /// is held to the same list: asserting the two loops are byte-equal catches
+    /// drift in either direction and covers the shipped file's own var list.
     #[test]
-    fn inline_openrc_fallback_reexports_confd_vars() {
+    fn openrc_scripts_reexport_confd_vars() {
         let script = openrc_initd_contents("/usr/bin/whisrsd");
+        let inline_loop = confd_reexport_loop(&script);
         for var in [
             "RUST_LOG",
             "WHISRS_DEEPGRAM_API_KEY",
             "WHISRS_GROQ_API_KEY",
             "WHISRS_OPENAI_API_KEY",
+            "WHISRS_ASR_SIDECAR_API_KEY",
             "XKB_DEFAULT_LAYOUT",
             "XKB_DEFAULT_VARIANT",
         ] {
             assert!(
-                script.contains(var),
-                "inline OpenRC fallback must re-export {var}; conf.d values are \
-                 sourced, not exported, so omitting it silently drops the setting"
+                inline_loop.contains(var),
+                "inline OpenRC fallback must re-export {var} from inside the \
+                 `for _var in ... done` loop; conf.d values are sourced, not \
+                 exported, so omitting it silently drops the setting. Naming it \
+                 in the comment above the loop does not count."
             );
         }
+
+        // `cargo install` builds have no contrib/ on disk; skip rather than fail.
+        let Some(shipped_path) = find_contrib_file("openrc/whisrs.initd") else {
+            return;
+        };
+        let shipped = fs::read_to_string(&shipped_path).unwrap_or_else(|e| {
+            panic!("failed to read {}: {e}", shipped_path.display());
+        });
+        assert_eq!(
+            confd_reexport_loop(&shipped),
+            inline_loop,
+            "contrib/openrc/whisrs.initd is the script users install, and its \
+             conf.d re-export loop must stay identical to the inline fallback's"
+        );
     }
 
     /// Exporting an empty `DISPLAY` is worse than leaving it unset: it makes

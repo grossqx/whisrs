@@ -176,7 +176,15 @@ fn current_key_summary(config: &Config) -> String {
             };
         }
         "asr-sidecar" | "asr" | "vibevoice" => {
-            return format!("{DIM}(sidecar backend — no API key needed){RESET}");
+            return match config
+                .asr_sidecar
+                .as_ref()
+                .and_then(|s| s.api_key.as_deref())
+                .filter(|key| !key.trim().is_empty())
+            {
+                Some(key) => format!("{BOLD}{}{RESET}", setup::mask_api_key(key)),
+                None => format!("{DIM}(optional API key not set){RESET}"),
+            };
         }
         _ => None,
     };
@@ -793,6 +801,9 @@ fn render_masked_toml(config: &Config) -> Result<String> {
     }
     if let Some(r) = clone.openai_compatible_realtime.as_mut() {
         r.api_key = r.api_key.as_ref().map(|key| setup::mask_api_key(key));
+    }
+    if let Some(s) = clone.asr_sidecar.as_mut() {
+        s.api_key = s.api_key.as_ref().map(|key| setup::mask_api_key(key));
     }
     if let Some(l) = clone.llm.as_mut() {
         l.api_key = setup::mask_api_key(&l.api_key);

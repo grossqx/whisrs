@@ -240,6 +240,10 @@ model_path = "~/.local/share/whisrs/models/ggml-base.en.bin"
 [asr-sidecar]
 url = "http://127.0.0.1:8765/transcribe"
 model = "microsoft/VibeVoice-ASR-HF"
+# Optional bearer token. Only needed for endpoints that require auth (a hosted
+# gateway, or a sidecar behind an authenticating proxy); local sidecars need
+# none. WHISRS_ASR_SIDECAR_API_KEY overrides it.
+# api_key = "optional bearer token"
 
 # Command mode: LLM for voice-driven text rewriting.
 # Also used by [[llm_commands]] (see below) and by
@@ -413,6 +417,7 @@ The following variables override the matching `api_key` in `config.toml`:
 - `WHISRS_GROQ_API_KEY`
 - `WHISRS_DEEPGRAM_API_KEY`
 - `WHISRS_OPENAI_API_KEY`
+- `WHISRS_ASR_SIDECAR_API_KEY`
 
 These provider keys are also used by the matching TTS backend (`groq`/`openai`/`deepgram`) unless `[tts] api_key` is set. The `tts-sidecar` backend needs no key.
 

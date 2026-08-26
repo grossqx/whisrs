@@ -544,6 +544,8 @@ pub struct AsrSidecarConfig {
     pub url: String,
     #[serde(default = "default_asr_sidecar_model")]
     pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2107,6 +2109,7 @@ mod tests {
             asr_sidecar: Some(AsrSidecarConfig {
                 url: "http://127.0.0.1:8765/transcribe".to_string(),
                 model: "microsoft/VibeVoice-ASR-HF".to_string(),
+                api_key: None,
             }),
             openai_compatible_realtime: None,
             llm: None,

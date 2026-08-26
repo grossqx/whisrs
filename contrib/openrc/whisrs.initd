@@ -51,6 +51,7 @@ error_log="${whisrsd_log_dir}/whisrsd.log"
 # reads from its own environment.
 for _var in RUST_LOG \
 	WHISRS_DEEPGRAM_API_KEY WHISRS_GROQ_API_KEY WHISRS_OPENAI_API_KEY \
+	WHISRS_ASR_SIDECAR_API_KEY \
 	XKB_DEFAULT_LAYOUT XKB_DEFAULT_VARIANT
 do
 	eval "[ -n \"\${$_var}\" ]" && export "$_var"

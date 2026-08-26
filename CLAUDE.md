@@ -219,6 +219,7 @@ Environment variable overrides:
 - `WHISRS_DEEPGRAM_API_KEY` — overrides `[deepgram] api_key` (also used by the `deepgram` TTS backend)
 - `WHISRS_GROQ_API_KEY` — overrides `[groq] api_key` (also used by the `groq` TTS backend)
 - `WHISRS_OPENAI_API_KEY` — overrides `[openai] api_key` (also used by the `openai` TTS backend)
+- `WHISRS_ASR_SIDECAR_API_KEY` — overrides `[asr-sidecar] api_key` (optional bearer token for authenticated sidecar endpoints)
 - `RUST_LOG` — controls daemon log verbosity
 
 ## CI Checks

@@ -65,6 +65,58 @@ fn resolve_deepgram_api_key(config: &Config) -> Option<String> {
     config.deepgram.as_ref().map(|d| d.api_key.clone())
 }
 
+/// Resolution rules for the ASR sidecar key, with the environment passed in.
+///
+/// Env vars are process-global, so the resolution itself is kept pure and
+/// [`asr_sidecar_backend`] is the only thing that reads the environment.
+/// `WHISRS_ASR_SIDECAR_API_KEY` wins over `[asr-sidecar] api_key`; both sides
+/// are trimmed and a blank value on either side counts as absent.
+fn resolve_asr_sidecar_api_key_from(env_key: Option<&str>, config: &Config) -> Option<String> {
+    if let Some(key) = env_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    config
+        .asr_sidecar
+        .as_ref()
+        .and_then(|s| s.api_key.as_deref())
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+/// Build the ASR sidecar backend described by `config`.
+///
+/// This is the only place the sidecar URL and the resolved API key are joined
+/// into a backend — [`create_backend`] just wraps the result in an `Arc`. It
+/// returns the concrete type so a test can assert that both actually made it
+/// in; a refactor that dropped the key here would otherwise show up nowhere
+/// but as a 401 against the user's sidecar.
+fn asr_sidecar_backend(config: &Config) -> AsrSidecarBackend {
+    asr_sidecar_backend_from(
+        std::env::var("WHISRS_ASR_SIDECAR_API_KEY").ok().as_deref(),
+        config,
+    )
+}
+
+/// [`asr_sidecar_backend`] with the environment passed in, so a stray
+/// `WHISRS_ASR_SIDECAR_API_KEY` in the shell running the tests cannot change
+/// what they assert.
+fn asr_sidecar_backend_from(env_key: Option<&str>, config: &Config) -> AsrSidecarBackend {
+    let url = config
+        .asr_sidecar
+        .as_ref()
+        .map(|v| v.url.clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8765/transcribe".to_string());
+    let api_key = resolve_asr_sidecar_api_key_from(env_key, config);
+    if api_key.is_some() {
+        info!("ASR sidecar API key configured");
+    }
+    info!("using ASR sidecar transcription backend ({url})");
+    AsrSidecarBackend::new(url, api_key)
+}
+
 fn sanitize_ws_endpoint_for_log(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return "<invalid ws endpoint>".to_string();
@@ -173,15 +225,7 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
             info!("using Parakeet transcription backend (model: {model_path})");
             Arc::new(ParakeetBackend::new(model_path))
         }
-        "asr-sidecar" | "asr" | "vibevoice" => {
-            let url = config
-                .asr_sidecar
-                .as_ref()
-                .map(|v| v.url.clone())
-                .unwrap_or_else(|| "http://127.0.0.1:8765/transcribe".to_string());
-            info!("using ASR sidecar transcription backend ({url})");
-            Arc::new(AsrSidecarBackend::new(url))
-        }
+        "asr-sidecar" | "asr" | "vibevoice" => Arc::new(asr_sidecar_backend(config)),
         "openai-compatible-realtime" => {
             let realtime = config.openai_compatible_realtime.as_ref().cloned();
             let Some(realtime) = realtime else {
@@ -267,6 +311,133 @@ pub(crate) fn get_model_for_backend(config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare config carrying only the `[asr-sidecar]` section under test.
+    fn config_with_sidecar_key(api_key: Option<&str>) -> Config {
+        Config {
+            general: Default::default(),
+            audio: Default::default(),
+            input: Default::default(),
+            deepgram: None,
+            groq: None,
+            openai: None,
+            local_whisper: None,
+            local_vosk: None,
+            local_parakeet: None,
+            asr_sidecar: Some(whisrs::AsrSidecarConfig {
+                url: "http://127.0.0.1:8765/transcribe".to_string(),
+                model: "microsoft/VibeVoice-ASR-HF".to_string(),
+                api_key: api_key.map(str::to_string),
+            }),
+            openai_compatible_realtime: None,
+            llm: None,
+            hotkeys: None,
+            hooks: None,
+            llm_commands: Vec::new(),
+            overlay: None,
+            tts: None,
+        }
+    }
+
+    #[test]
+    fn asr_sidecar_env_key_wins_over_config() {
+        let config = config_with_sidecar_key(Some("config-key"));
+        assert_eq!(
+            resolve_asr_sidecar_api_key_from(Some("env-key"), &config).as_deref(),
+            Some("env-key")
+        );
+    }
+
+    #[test]
+    fn asr_sidecar_config_key_used_when_env_is_absent() {
+        let config = config_with_sidecar_key(Some("config-key"));
+        assert_eq!(
+            resolve_asr_sidecar_api_key_from(None, &config).as_deref(),
+            Some("config-key")
+        );
+    }
+
+    #[test]
+    fn asr_sidecar_blank_env_key_falls_through_to_config() {
+        let config = config_with_sidecar_key(Some("config-key"));
+        assert_eq!(
+            resolve_asr_sidecar_api_key_from(Some("   "), &config).as_deref(),
+            Some("config-key")
+        );
+    }
+
+    #[test]
+    fn asr_sidecar_blank_config_key_resolves_to_none() {
+        let config = config_with_sidecar_key(Some("   "));
+        assert_eq!(resolve_asr_sidecar_api_key_from(Some(""), &config), None);
+        assert_eq!(resolve_asr_sidecar_api_key_from(None, &config), None);
+    }
+
+    #[test]
+    fn asr_sidecar_keys_are_trimmed_on_both_paths() {
+        let config = config_with_sidecar_key(Some("  config-key\n"));
+        assert_eq!(
+            resolve_asr_sidecar_api_key_from(Some("  env-key\n"), &config).as_deref(),
+            Some("env-key")
+        );
+        assert_eq!(
+            resolve_asr_sidecar_api_key_from(None, &config).as_deref(),
+            Some("config-key")
+        );
+    }
+
+    #[test]
+    fn asr_sidecar_missing_section_resolves_to_none() {
+        let mut config = config_with_sidecar_key(None);
+        config.asr_sidecar = None;
+        assert_eq!(resolve_asr_sidecar_api_key_from(None, &config), None);
+    }
+
+    /// Assert the constructed backend, not the resolver. `asr_sidecar_backend`
+    /// is the single join between a resolved key and the thing that sends it,
+    /// so a refactor that dropped the key there would leave every
+    /// `resolve_*` test above green and only fail against a real sidecar.
+    #[test]
+    fn asr_sidecar_backend_carries_the_configured_url_and_key() {
+        let mut config = config_with_sidecar_key(Some("sk-config-key"));
+        config.asr_sidecar.as_mut().unwrap().url = "http://sidecar.local:9000/asr".to_string();
+
+        let backend = asr_sidecar_backend_from(None, &config);
+
+        assert_eq!(backend.url(), "http://sidecar.local:9000/asr");
+        assert_eq!(backend.api_key(), Some("sk-config-key"));
+    }
+
+    #[test]
+    fn asr_sidecar_backend_carries_the_env_key() {
+        let config = config_with_sidecar_key(None);
+
+        let backend = asr_sidecar_backend_from(Some("sk-env-key"), &config);
+
+        assert_eq!(backend.api_key(), Some("sk-env-key"));
+    }
+
+    #[test]
+    fn asr_sidecar_backend_is_unauthenticated_without_a_key() {
+        let config = config_with_sidecar_key(None);
+
+        let backend = asr_sidecar_backend_from(None, &config);
+
+        assert_eq!(backend.api_key(), None);
+    }
+
+    /// `[asr-sidecar]` is optional, so selecting the backend with no section at
+    /// all must still point at the address the contrib sidecar recipes bind to.
+    #[test]
+    fn asr_sidecar_backend_falls_back_to_the_default_url() {
+        let mut config = config_with_sidecar_key(None);
+        config.asr_sidecar = None;
+
+        let backend = asr_sidecar_backend_from(None, &config);
+
+        assert_eq!(backend.url(), "http://127.0.0.1:8765/transcribe");
+        assert_eq!(backend.api_key(), None);
+    }
 
     #[test]
     fn sanitize_ws_endpoint_for_log_strips_credentials_and_query() {
