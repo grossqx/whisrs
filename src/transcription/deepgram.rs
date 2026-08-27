@@ -416,6 +416,11 @@ impl TranscriptionBackend for DeepgramRestBackend {
 
     // Uses the default transcribe_stream (collect + transcribe) since this
     // backend does not support streaming.
+
+    // Deepgram has no prompt field; vocabulary rides as `keyterm` params.
+    fn sends_prompt(&self) -> bool {
+        false
+    }
 }
 
 // ===========================================================================
@@ -609,11 +614,21 @@ impl TranscriptionBackend for DeepgramStreamingBackend {
     fn supports_streaming(&self) -> bool {
         true
     }
+
+    fn sends_prompt(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deepgram_backends_never_send_the_prompt() {
+        assert!(!DeepgramRestBackend::new(String::new()).sends_prompt());
+        assert!(!DeepgramStreamingBackend::new(String::new()).sends_prompt());
+    }
 
     #[test]
     fn map_language_auto_to_multi() {

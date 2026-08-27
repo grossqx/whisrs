@@ -547,11 +547,17 @@ impl<'a> BatchOptions<'a> {
         }
     }
 
-    /// Whether `text` must be discarded as the model echoing the prompt back.
-    /// Only fires when the echo check is enabled for this path *and* a prompt
-    /// was actually sent — with no prompt there is nothing to echo.
-    fn should_drop_as_echo(&self, prompt: Option<&str>, text: &str) -> bool {
-        self.check_prompt_echo && prompt.is_some_and(|prompt| is_prompt_echo(text, prompt))
+    /// `config.prompt` is set for every backend, including ones that never
+    /// transmit it — hence the separate `backend_sends_prompt` gate.
+    fn should_drop_as_echo(
+        &self,
+        backend_sends_prompt: bool,
+        prompt: Option<&str>,
+        text: &str,
+    ) -> bool {
+        self.check_prompt_echo
+            && backend_sends_prompt
+            && prompt.is_some_and(|prompt| is_prompt_echo(text, prompt))
     }
 }
 
@@ -672,7 +678,11 @@ pub(crate) async fn transcribe_batch_audio(
     // followed by silence) sometimes squeak through and trigger the model to
     // regurgitate the prompt. Drop those before they reach the keyboard (or,
     // for llm-commands, the LLM).
-    if opts.should_drop_as_echo(config.prompt.as_deref(), &text) {
+    if opts.should_drop_as_echo(
+        context.transcription_backend.sends_prompt(),
+        config.prompt.as_deref(),
+        &text,
+    ) {
         warn!(
             "discarding likely prompt-echo response ({} chars) — see prompt_echo crate",
             text.len()
@@ -1459,11 +1469,6 @@ mod tests {
         );
     }
 
-    /// The prompt-echo guard fires only when the path enables the check AND a
-    /// prompt was actually sent — with no prompt there is nothing the model
-    /// could have echoed. In particular the llm-command path (whose
-    /// transcript is LLM input) checks, while command mode (which sends no
-    /// prompt) never does.
     #[test]
     fn prompt_echo_guard_conditions() {
         let prompt = "Embedded Linux dictation about Hyprland and whisrs";
@@ -1476,6 +1481,7 @@ mod tests {
             (
                 "dictation: echo with prompt drops",
                 BatchOptions::dictation(),
+                true,
                 Some(prompt),
                 echoed,
                 true,
@@ -1483,6 +1489,7 @@ mod tests {
             (
                 "dictation: no prompt sent, nothing to echo",
                 BatchOptions::dictation(),
+                true,
                 None,
                 echoed,
                 false,
@@ -1490,28 +1497,47 @@ mod tests {
             (
                 "dictation: genuine speech passes",
                 BatchOptions::dictation(),
+                true,
                 Some(prompt),
                 genuine,
                 false,
             ),
             (
+                "dictation: promptless backend, vocabulary-shaped speech passes (#133)",
+                BatchOptions::dictation(),
+                false,
+                Some(prompt),
+                echoed,
+                false,
+            ),
+            (
                 "llm_command: echo with prompt drops",
                 BatchOptions::llm_command("proofread"),
+                true,
                 Some(prompt),
                 echoed,
                 true,
             ),
             (
+                "llm_command: promptless backend, echo-shaped text passes (#133)",
+                BatchOptions::llm_command("proofread"),
+                false,
+                Some(prompt),
+                echoed,
+                false,
+            ),
+            (
                 "command_mode: check disabled, echo-shaped text passes",
                 BatchOptions::command_mode(),
+                true,
                 Some(prompt),
                 echoed,
                 false,
             ),
         ];
-        for (name, opts, prompt, text, expect_drop) in cases {
+        for (name, opts, backend_sends_prompt, prompt, text, expect_drop) in cases {
             assert_eq!(
-                opts.should_drop_as_echo(prompt, text),
+                opts.should_drop_as_echo(backend_sends_prompt, prompt, text),
                 expect_drop,
                 "{name}"
             );

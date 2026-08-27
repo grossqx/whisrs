@@ -363,6 +363,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn groq_sends_the_prompt() {
+        assert!(GroqBackend::new(String::new()).sends_prompt());
+    }
+
+    #[test]
     fn parse_verbose_json_response() {
         let body = r#"{
             "text": "Hello, how are you?",

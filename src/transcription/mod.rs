@@ -114,4 +114,10 @@ pub trait TranscriptionBackend: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Gates the prompt-echo filter: a backend that never sends the prompt
+    /// has nothing to echo.
+    fn sends_prompt(&self) -> bool {
+        true
+    }
 }
