@@ -428,6 +428,10 @@ Claude Code
 NixOS
 ```
 
+A term that starts with `#` is stored with a single leading backslash
+(`\#rust`), which is stripped when the file is read; a `#` anywhere else on the
+line is literal, so `C# dev` needs nothing.
+
 At daemon startup the file is merged into `[general] vocabulary` — config.toml's
 terms first, then the file's, duplicates dropped — before the config is
 validated, so the Deepgram keyterm limits and their startup warnings count the
@@ -436,10 +440,15 @@ it. Like the rest of the config, the file is read once at startup, so run
 `whisrs restart` after editing it.
 
 When the file exists, the `whisrs config` vocabulary editor shows the merged
-list and writes it back to `vocabulary.txt` on save (config.toml is then saved
-with an empty `vocabulary`, so no term is stored twice). The rewrite drops any
-comment lines you added by hand. Only `vocabulary` gets this treatment —
-`prompt` and everything else stay in `config.toml`.
+list. If you change that list, the whole of it is written back to
+`vocabulary.txt` on save and config.toml is saved with an empty `vocabulary`,
+so no term is stored twice. That rewrite is flat, so any comment lines and
+blank-line grouping you added by hand are dropped at that point. If you leave
+the vocabulary alone — including opening the editor and accepting the list as
+shown — saving other settings touches neither store: your `vocabulary.txt`
+keeps its comments and config.toml keeps its terms. Only
+`vocabulary` gets this treatment; `prompt` and everything else stay in
+`config.toml`.
 
 ## Environment variables
 
