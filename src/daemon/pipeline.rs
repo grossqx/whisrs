@@ -548,7 +548,9 @@ impl<'a> BatchOptions<'a> {
     }
 
     /// `config.prompt` is set for every backend, including ones that never
-    /// transmit it — hence the separate `backend_sends_prompt` gate.
+    /// transmit it — hence the separate `backend_sends_prompt` gate. The
+    /// caller reads that flag off `TranscriptionBackend::sends_prompt` per
+    /// request, since the realtime backends answer it from the model.
     fn should_drop_as_echo(
         &self,
         backend_sends_prompt: bool,
@@ -679,7 +681,7 @@ pub(crate) async fn transcribe_batch_audio(
     // regurgitate the prompt. Drop those before they reach the keyboard (or,
     // for llm-commands, the LLM).
     if opts.should_drop_as_echo(
-        context.transcription_backend.sends_prompt(),
+        context.transcription_backend.sends_prompt(&config),
         config.prompt.as_deref(),
         &text,
     ) {
@@ -1469,6 +1471,19 @@ mod tests {
         );
     }
 
+    /// The prompt-echo guard needs all three conditions to fire: the calling
+    /// path enables the check, the backend actually transmits the prompt, and
+    /// a prompt exists.
+    ///
+    /// The llm-command path (whose transcript is LLM input) checks, while
+    /// command mode (which sends no prompt) never does. The backend gate is
+    /// issue #133: `config.prompt` is built for every backend, but Deepgram
+    /// and `openai-compatible-realtime` never put it on the wire, so without
+    /// that condition genuine speech resembling the user's own
+    /// `[general] vocabulary` was discarded as an echo of something the model
+    /// never saw. `openai-realtime` joins them whenever the model puts the
+    /// session in manual-commit mode, which is why the flag is read per
+    /// request rather than per backend.
     #[test]
     fn prompt_echo_guard_conditions() {
         let prompt = "Embedded Linux dictation about Hyprland and whisrs";
@@ -1542,6 +1557,117 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // ── The #133 gate is wired into the batch path ──────────────────────
+    //
+    // `should_drop_as_echo` is covered above and the per-backend answers are
+    // covered next to each backend, but neither proves `transcribe_batch_audio`
+    // ever *asks* the backend. Hardcoding `true` at that call site — which
+    // disables the whole fix — left every one of those tests green. That is the
+    // failure shape of #71 all over again, so the two tests below drive the real
+    // function and flip nothing but `sends_prompt()`.
+
+    /// A backend that returns a fixed transcript and answers `sends_prompt()`
+    /// however the test asks it to. Nothing else about the batch path cares.
+    struct StubBackend {
+        text: &'static str,
+        sends_prompt: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TranscriptionBackend for StubBackend {
+        async fn transcribe(
+            &self,
+            _audio: &[u8],
+            _config: &TranscriptionConfig,
+        ) -> anyhow::Result<String> {
+            Ok(self.text.to_string())
+        }
+
+        fn sends_prompt(&self, _config: &TranscriptionConfig) -> bool {
+            self.sends_prompt
+        }
+    }
+
+    /// Terms a user would put in `[general] vocabulary`. They are what
+    /// `batch_transcription_config` turns into the prompt.
+    const WIRING_VOCABULARY: [&str; 4] = ["Hyprland", "whisrs", "Wayland", "systemd"];
+
+    /// Genuine speech that normalizes to a substring of the prompt built from
+    /// `WIRING_VOCABULARY`, so `is_prompt_echo` flags it. Someone dictating a
+    /// run of their own vocabulary terms produces exactly this shape — which
+    /// is what issue #133 reported.
+    const VOCABULARY_SHAPED_SPEECH: &str = "Hyprland, whisrs, Wayland";
+
+    /// `notify: false` keeps `send_notification` (which spawns a D-Bus thread)
+    /// out of the picture on both branches.
+    fn context_with_backend(backend: StubBackend) -> DaemonContext {
+        DaemonContext {
+            config: config_with_vocabulary(&WIRING_VOCABULARY),
+            window_tracker: Arc::new(whisrs::window::NoopTracker),
+            transcription_backend: Arc::new(backend),
+            notify: false,
+            state_tx: tokio::sync::watch::channel(State::Idle).0,
+            overlay_level_tx: None,
+            overlay_enabled: false,
+        }
+    }
+
+    /// Half a second of alternating full-ish amplitude: past `AUDIO_GATE_MIN_MS`
+    /// and far above `SILENCE_RMS_THRESHOLD`, so the upstream gate lets the
+    /// buffer reach the backend instead of short-circuiting to `Ok("")`.
+    fn audio_that_passes_the_gate() -> Vec<i16> {
+        (0..SAMPLE_RATE as usize / 2)
+            .map(|i| if i % 2 == 0 { 8_000 } else { -8_000 })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn batch_path_keeps_echo_shaped_text_from_a_promptless_backend() {
+        let context = context_with_backend(StubBackend {
+            text: VOCABULARY_SHAPED_SPEECH,
+            sends_prompt: false,
+        });
+
+        let text = transcribe_batch_audio(
+            &audio_that_passes_the_gate(),
+            &context,
+            "en",
+            &BatchOptions::dictation(),
+        )
+        .await
+        .expect("the stub backend never fails");
+
+        assert_eq!(
+            text, VOCABULARY_SHAPED_SPEECH,
+            "the backend never sent the prompt, so this cannot be an echo of it (#133) — \
+             does `transcribe_batch_audio` still pass `sends_prompt()` to `should_drop_as_echo`?"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_path_drops_echo_shaped_text_from_a_prompting_backend() {
+        // Same audio, same transcript, same options — only the backend's
+        // answer changes, which pins the flag as the thing being consulted.
+        let context = context_with_backend(StubBackend {
+            text: VOCABULARY_SHAPED_SPEECH,
+            sends_prompt: true,
+        });
+
+        let text = transcribe_batch_audio(
+            &audio_that_passes_the_gate(),
+            &context,
+            "en",
+            &BatchOptions::dictation(),
+        )
+        .await
+        .expect("the stub backend never fails");
+
+        assert!(
+            text.is_empty(),
+            "a backend that does send the prompt must still have echoes filtered, got {text:?}"
+        );
     }
 
     // ── Toggle-path LLM post-processing (issue #85) ─────────────────────

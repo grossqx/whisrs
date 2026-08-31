@@ -348,6 +348,12 @@ impl TranscriptionBackend for GroqBackend {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    // Whisper's `prompt` multipart field, set by both request builders
+    // (`form.text("prompt", ...)` in `transcribe` and in the chunked path).
+    fn sends_prompt(&self, _config: &TranscriptionConfig) -> bool {
+        true
+    }
 }
 
 /// Parse a Groq verbose JSON response body into a `GroqTranscriptionResponse`.
@@ -364,7 +370,14 @@ mod tests {
 
     #[test]
     fn groq_sends_the_prompt() {
-        assert!(GroqBackend::new(String::new()).sends_prompt());
+        let request = TranscriptionConfig {
+            language: "en".to_string(),
+            model: "whisper-large-v3-turbo".to_string(),
+            prompt: Some("Hyprland, whisrs".to_string()),
+            keyterms: Vec::new(),
+        };
+
+        assert!(GroqBackend::new(String::new()).sends_prompt(&request));
     }
 
     #[test]
