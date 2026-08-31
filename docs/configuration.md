@@ -18,7 +18,8 @@ audio_feedback = true       # play tones on record start/stop/done
 audio_feedback_volume = 0.5 # 0.0 to 1.0
 vocabulary = ["whisrs", "Hyprland"]  # custom terms for better transcription accuracy
                             # (sent to Deepgram as keyterms on Nova-3/Flux, ignored on
-                            # older models; folded into the prompt hint elsewhere)
+                            # older models; elsewhere it is folded into the prompt hint,
+                            # so it only reaches the backends that send one — see prompt)
                             # very long lists are truncated for Deepgram, since every
                             # keyterm rides in the request URI — the daemon warns at
                             # startup naming how many terms actually reach it
@@ -26,8 +27,13 @@ vocabulary = ["whisrs", "Hyprland"]  # custom terms for better transcription acc
                             # to this file — see "The vocabulary file" below
 prompt = "Speech is in English or Spanish. Transcribe in the language spoken; never translate."
                             # optional sentence-style context, prepended to vocabulary
-                            # (passed to Groq, OpenAI REST/Realtime, and local whisper.cpp;
-                            # Deepgram takes no prompt — use vocabulary there)
+                            # (reaches Groq, OpenAI REST, local whisper.cpp, and the
+                            # asr-sidecar, which takes it as its `hotwords` field.
+                            # Deepgram sends no prompt — use vocabulary there instead.
+                            # openai-compatible-realtime sends neither, so neither key
+                            # reaches it. openai-realtime sends a prompt only on
+                            # server-VAD models like gpt-4o-transcribe, not on the
+                            # gpt-realtime-whisper that `whisrs setup` writes for it)
 tray = true                 # system tray icon (requires SNI host like waybar)
 overlay = false             # bottom-screen recording overlay (Hyprland/Sway, GNOME extension)
 
